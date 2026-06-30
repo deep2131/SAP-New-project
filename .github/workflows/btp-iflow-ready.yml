@@ -1,0 +1,130 @@
+name: BTP iFlow Backup - ReadyForDeployment
+
+on:
+  schedule:
+    # ⏰ Runs at 6 AM & 6 PM UTC (11:30 AM & 11:30 PM IST)
+    - cron: '0 6,18 * * *'
+  workflow_dispatch:   # Manual trigger option
+
+jobs:
+  backup-ready-iflows:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      # 1️⃣ Checkout repo
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 2️⃣ Install required tools
+      - name: Install Required Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl unzip
+
+      # 3️⃣ Get OAuth Token from BTP
+      - name: Get OAuth Token
+        run: |
+          echo "🔐 Fetching OAuth token from BTP..."
+          TOKEN=$(curl -s -X POST "${{ secrets.SAP_BTP_TOKEN_URL }}" \
+            -u "${{ secrets.SAP_BTP_CLIENT_ID }}:${{ secrets.SAP_BTP_CLIENT_SECRET }}" \
+            -d "grant_type=client_credentials" | jq -r .access_token)
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "❌ Failed to retrieve OAuth token"
+            exit 1
+          fi
+
+          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
+          echo "✅ Token retrieved successfully"
+
+      # 4️⃣ Fetch all iFlows & filter only ReadyForDeployment
+      - name: Fetch iFlows Tagged as ReadyForDeployment
+        run: |
+          echo "📥 Fetching all iFlows..."
+          mkdir -p iflows
+
+          curl -s -X GET "${{ secrets.SAP_BTP_API_URL }}/IntegrationDesigntimeArtifacts" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/json" \
+            -o all-iflows.json
+
+          echo "🔍 Filtering iFlows with version containing 'ReadyForDeployment'..."
+          jq -r '.d.results[] 
+                  | select(.Version | test("ReadyForDeployment"; "i")) 
+                  | "\(.Id)|\(.Version)"' all-iflows.json > ready-iflows.txt
+
+          COUNT=$(wc -l < ready-iflows.txt)
+          echo "✅ Found $COUNT iFlows tagged ReadyForDeployment"
+          cat ready-iflows.txt
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ℹ️ No iFlows tagged ReadyForDeployment found. Exiting cleanly."
+            echo "SKIP_COMMIT=true" >> $GITHUB_ENV
+            exit 0
+          fi
+
+      # 5️⃣ Download filtered iFlows
+      - name: Download ReadyForDeployment iFlows
+        if: env.SKIP_COMMIT != 'true'
+        run: |
+          echo "⬇️ Downloading filtered iFlows..."
+          while IFS='|' read -r ID VERSION; do
+            echo "📦 Downloading: $ID (v$VERSION)"
+            ENCODED_VERSION=$(echo "$VERSION" | sed 's/ /%20/g')
+            curl -s -X GET "${{ secrets.SAP_BTP_API_URL }}/IntegrationDesigntimeArtifacts(Id='${ID}',Version='${ENCODED_VERSION}')/\$value" \
+              -H "Authorization: Bearer $TOKEN" \
+              -o "iflows/${ID}_${VERSION}.zip"
+          done < ready-iflows.txt
+
+          echo "✅ All ReadyForDeployment iFlows downloaded"
+          ls -lh iflows/
+
+      # 6️⃣ Create feature branch
+      - name: Create Feature Branch
+        if: env.SKIP_COMMIT != 'true'
+        run: |
+          BRANCH_NAME="feature/iflow-ready-backup-$(date +'%Y%m%d-%H%M')"
+          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b $BRANCH_NAME
+
+      # 7️⃣ Commit & Push
+      - name: Commit and Push Changes
+        if: env.SKIP_COMMIT != 'true'
+        run: |
+          git add iflows/
+          if git diff --cached --quiet; then
+            echo "ℹ️ No new changes detected. Skipping commit."
+            exit 0
+          fi
+
+          git commit -m "🚀 Backup: ReadyForDeployment iFlows from BTP [$(date +'%Y-%m-%d %H:%M')]"
+          git push origin $BRANCH_NAME
+          echo "✅ Changes pushed to $BRANCH_NAME"
+
+      # 8️⃣ Create Pull Request
+      - name: Create Pull Request
+        if: env.SKIP_COMMIT != 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ env.BRANCH_NAME }}
+          base: main
+          title: "🚀 Auto Backup: ReadyForDeployment iFlows"
+          body: |
+            ### Automated iFlow Backup (ReadyForDeployment)
+            - 🕐 Triggered by scheduled cron job
+            - 🏷️ Filter applied: Version contains **ReadyForDeployment**
+            - 📦 iFlows downloaded from SAP BTP Integration Suite
+            - ✅ Please review before merging into main
+          labels: |
+            automation
+            iflow-backup
+            ready-for-deployment
