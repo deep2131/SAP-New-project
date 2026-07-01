@@ -207,6 +207,11 @@ jobs:
             echo "No iFlows found with valid deployment version tag."
             exit 0
           fi
+      - name: Debug SAP artifact versions
+        shell: bash
+        run: |
+          echo "SAP artifacts returned by API:"
+          jq -r '.d.results[] | "ID: \(.Id) | Name: \(.Name) | Version: \(.Version) | Description: \(.Description)"' artifacts-response.json   
           
       - name: Download matched iFlows from SAP BTP
         shell: bash
@@ -220,25 +225,27 @@ jobs:
           jq -c '.[]' matched-iflows.json | while read -r artifact; do
             IFLOW_ID=$(echo "$artifact" | jq -r '.id')
             IFLOW_NAME=$(echo "$artifact" | jq -r '.name')
-            IFLOW_VERSION=$(echo "$artifact" | jq -r '.version')
+            SAP_VERSION=$(echo "$artifact" | jq -r '.sapVersion')
+            DEPLOYMENT_TAG=$(echo "$artifact" | jq -r '.deploymentTag')
 
             SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
-            SAFE_VERSION=$(echo "$IFLOW_VERSION" | tr -cd '[:alnum:]_.-')
+            SAFE_TAG=$(echo "$DEPLOYMENT_TAG" | tr -cd '[:alnum:]_.-')
 
-            TARGET_PATH="$DOWNLOAD_DIR/$SAFE_ID/$SAFE_VERSION"
-            ZIP_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_VERSION}.zip"
+            TARGET_PATH="$DOWNLOAD_DIR/$SAFE_ID/$SAFE_TAG"
+            ZIP_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_TAG}.zip"
 
             mkdir -p "$TARGET_PATH"
 
             ENCODED_ID=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$IFLOW_ID''', safe=''))")
-            ENCODED_VERSION=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$IFLOW_VERSION''', safe=''))")
+            ENCODED_VERSION=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$SAP_VERSION''', safe=''))")
 
             DOWNLOAD_URL="$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts(Id='$ENCODED_ID',Version='$ENCODED_VERSION')/\$value"
 
             echo "Downloading iFlow:"
-            echo "ID      : $IFLOW_ID"
-            echo "Name    : $IFLOW_NAME"
-            echo "Version : $IFLOW_VERSION"
+            echo "ID             : $IFLOW_ID"
+            echo "Name           : $IFLOW_NAME"
+            echo "SAP Version    : $SAP_VERSION"
+            echo "Deployment Tag : $DEPLOYMENT_TAG"
 
             HTTP_CODE=$(curl -sS \
               --request GET "$DOWNLOAD_URL" \
@@ -250,15 +257,16 @@ jobs:
             echo "HTTP status: $HTTP_CODE"
 
             if [ "$HTTP_CODE" != "200" ]; then
-              echo "Download failed for $IFLOW_ID version $IFLOW_VERSION"
-              echo "Expected URL pattern:"
-              echo "$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts(Id='<ID>',Version='<VERSION>')/\$value"
+              echo "ERROR: Download failed."
+              echo "Reason may be wrong SAP Version, wrong CPI API base URL, or unsupported tenant endpoint."
+              echo "URL pattern used:"
+              echo "$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts(Id='<ID>',Version='<SAP_VERSION>')/\$value"
               rm -f "$ZIP_FILE"
               exit 1
             fi
 
             if [ ! -s "$ZIP_FILE" ]; then
-              echo "Downloaded file is empty for $IFLOW_ID version $IFLOW_VERSION"
+              echo "ERROR: Downloaded file is empty."
               exit 1
             fi
 
