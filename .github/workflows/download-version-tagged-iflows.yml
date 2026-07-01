@@ -104,9 +104,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ -z "${SAP_CPI_API_BASE_URL:-}" ]; then
+            echo "ERROR: SAP_CPI_API_BASE_URL secret is missing or empty."
+            exit 1
+          fi
+
+          SAP_CPI_API_BASE_URL="${SAP_CPI_API_BASE_URL%/}"
+
           mkdir -p "$DOWNLOAD_DIR"
 
-          echo "Fetching integration design-time artifacts from SAP BTP..."
+          echo "Fetching design-time artifacts from SAP BTP..."
 
           curl -sS --fail \
             --request GET "$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts?\$format=json" \
@@ -114,21 +121,20 @@ jobs:
             --header "Accept: application/json" \
             --output artifacts-response.json
 
-          echo "Filtering only iFlows where Version matches:"
-          echo "v<major>.<minor>.<patch>.$DEPLOYMENT_MARKER"
-          echo "Example: v1.1.2.$DEPLOYMENT_MARKER"
+          echo "Filtering only iFlows where version matches:"
+          echo "vX.Y.Z.ReadyForDeployment"
 
           python3 << 'PY'
           import json
           import os
           import re
 
-          deployment_marker = os.environ["DEPLOYMENT_MARKER"]
+          deployment_marker = "ReadyForDeployment"
 
-          # Strict pattern:
+          # Accepted format:
           # v1.1.2.ReadyForDeployment
-          version_tag_pattern = re.compile(
-              rf"^v\d+\.\d+\.\d+.{re.escape(deployment_marker)}$"
+          version_pattern = re.compile(
+              rf"^v\d+\.\d+\.\d+\.{re.escape(deployment_marker)}$"
           )
 
           with open("artifacts-response.json", "r", encoding="utf-8") as file:
@@ -142,7 +148,7 @@ jobs:
           for artifact in artifacts:
               artifact_id = artifact.get("Id")
               artifact_name = artifact.get("Name", artifact_id)
-              version = artifact.get("Version")
+              artifact_version = artifact.get("Version")
               artifact_type = artifact.get("ArtifactType") or artifact.get("Type")
 
               if not artifact_id:
@@ -152,7 +158,7 @@ jobs:
                   })
                   continue
 
-              if not version:
+              if not artifact_version:
                   skipped.append({
                       "id": artifact_id,
                       "name": artifact_name,
@@ -160,19 +166,19 @@ jobs:
                   })
                   continue
 
-              if version_tag_pattern.match(version):
+              if version_pattern.match(artifact_version):
                   matched.append({
                       "id": artifact_id,
                       "name": artifact_name,
-                      "version": version,
+                      "version": artifact_version,
                       "type": artifact_type
                   })
               else:
                   skipped.append({
                       "id": artifact_id,
                       "name": artifact_name,
-                      "version": version,
-                      "reason": "Version does not match deployment tag pattern"
+                      "version": artifact_version,
+                      "reason": "Version does not match vX.Y.Z.ReadyForDeployment"
                   })
 
           with open("matched-iflows.json", "w", encoding="utf-8") as file:
@@ -189,17 +195,17 @@ jobs:
               for item in matched:
                   print(f"- {item['id']} | Version: {item['version']}")
           else:
-              print("No iFlows found with valid version deployment tag.")
+              print("No iFlows found with version vX.Y.Z.ReadyForDeployment")
           PY
 
           MATCH_COUNT=$(jq length matched-iflows.json)
 
           if [ "$MATCH_COUNT" -eq 0 ]; then
-            echo "No iFlows found with version tag vX.Y.Z.$DEPLOYMENT_MARKER"
+            echo "No iFlows found with version pattern vX.Y.Z.ReadyForDeployment"
             echo "Nothing to download."
             exit 0
           fi
-
+          
       - name: Download matched iFlows from SAP BTP
         shell: bash
         env:
