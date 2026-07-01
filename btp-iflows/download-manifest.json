@@ -1,21 +1,17 @@
 {
-  "downloadedAtUtc": "2026-07-01T13:13:08Z",
+  "downloadedAtUtc": "2026-07-01T15:18:24Z",
   "targetBranch": "feature/btp-iflow-backup",
-  "acceptedVersionFormat": "X.Y.Z.ReadyForDeployment",
-  "scanRange": {
-    "maxMajor": 2,
-    "maxMinor": 5,
-    "maxPatch": 5
-  },
-  "selectionRule": "For each discovered iFlow, pipeline scans saved versions from highest to lowest and downloads the first matching X.Y.Z.ReadyForDeployment version.",
+  "registryFile": ".config/ready-iflows.json",
+  "versionRule": "Only versions matching X.Y.Z.ReadyForDeployment are allowed.",
+  "selectionRule": "Pipeline downloads only iFlows explicitly listed in .config/ready-iflows.json.",
   "downloadRule": "Download URL uses IntegrationDesigntimeArtifacts(Id=<id>,Version=<X.Y.Z.ReadyForDeployment>)/$value.",
   "artifacts": [
     {
       "id": "iflow2",
-      "name": "iflow2",
-      "packageId": "DemoIntegrationPackage",
       "downloadedVersion": "1.1.2.ReadyForDeployment",
-      "zipFile": "btp-iflows/iflow2/1.1.2.ReadyForDeployment/iflow2_1.1.2.ReadyForDeployment.zip"
+      "zipFile": "btp-iflows/iflow2/1.1.2.ReadyForDeployment/iflow2_1.1.2.ReadyForDeployment.zip",
+      "folder": "btp-iflows/iflow2/1.1.2.ReadyForDeployment",
+      "status": "Downloaded"
     }
   ]
 }
