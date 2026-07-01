@@ -42,6 +42,7 @@ jobs:
   download-ready-iflows:
     name: Download tagged iFlows from SAP BTP
     runs-on: ubuntu-latest
+    environment: dev
 
     steps:
       - name: Checkout repository
