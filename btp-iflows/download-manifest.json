@@ -1,12 +1,8 @@
 {
-  "downloadedAtUtc": "2026-07-01T11:22:41Z",
+  "downloadedAtUtc": "2026-07-01T11:29:22Z",
   "targetBranch": "feature/btp-iflow-backup",
-  "acceptedVersionFormat": "vX.Y.Z.ReadyForDeployment",
-  "scanRange": {
-    "maxMajor": 2,
-    "maxMinor": 5,
-    "maxPatch": 10
-  },
-  "selectionRule": "Pipeline dynamically tries versions matching vX.Y.Z.ReadyForDeployment and downloads only successful SAP CPI responses.",
+  "savedVersionUsedForDownload": "ReadyForDeployment",
+  "selectionRule": "Pipeline downloads artifacts only when SAP CPI saved artifact version is exactly ReadyForDeployment.",
+  "downloadRule": "Download URL uses IntegrationDesigntimeArtifacts(Id=<id>,Version=ReadyForDeployment)/$value.",
   "artifacts": []
 }
