@@ -504,23 +504,24 @@ jobs:
           set -euo pipefail
 
           MANIFEST_FILE="$DOWNLOAD_DIR/download-manifest.json"
+          ACCEPTED_VERSION_FORMAT="vX.Y.Z.${DEPLOYMENT_MARKER}"
 
           jq \
             --arg downloadedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
             --arg marker "$DEPLOYMENT_MARKER" \
             --arg targetBranch "$TARGET_BRANCH" \
+            --arg acceptedVersionFormat "$ACCEPTED_VERSION_FORMAT" \
             '{
               downloadedAtUtc: $downloadedAt,
               targetBranch: $targetBranch,
               deploymentMarker: $marker,
-              acceptedDeploymentVersionFormat: "vX.Y.Z." + $marker,
+              acceptedDeploymentVersionFormat: $acceptedVersionFormat,
               versionMatchRule: "Only SAP artifact Version field is checked. Name, Description, Tags, Labels, and Keywords are ignored.",
               artifacts: .
             }' matched-iflows.json > "$MANIFEST_FILE"
 
           echo "Download manifest created:"
           cat "$MANIFEST_FILE"
-
       - name: Commit and push downloaded iFlows
         shell: bash
         run: |
