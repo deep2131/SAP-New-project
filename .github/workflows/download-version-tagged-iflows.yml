@@ -115,8 +115,8 @@ jobs:
             --output artifacts-response.json
 
           echo "Filtering only iFlows where Version matches:"
-          echo "v<major>.<minor>.<patch>-$DEPLOYMENT_MARKER"
-          echo "Example: v1.1.2-$DEPLOYMENT_MARKER"
+          echo "v<major>.<minor>.<patch>.$DEPLOYMENT_MARKER"
+          echo "Example: v1.1.2.$DEPLOYMENT_MARKER"
 
           python3 << 'PY'
           import json
