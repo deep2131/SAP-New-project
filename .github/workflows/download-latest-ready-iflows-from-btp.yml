@@ -369,7 +369,6 @@ jobs:
             echo "No artifact IDs discovered. Nothing to download."
             exit 0
           fi
-
       - name: Download latest X.Y.Z.ReadyForDeployment version per iFlow
         shell: bash
         env:
@@ -402,7 +401,6 @@ jobs:
             echo "------------------------------------------------------------"
 
             FOUND_VERSION=""
-            FOUND_ZIP_FILE=""
 
             for MAJOR in $(seq "$MAX_MAJOR" -1 0); do
               if [ -n "$FOUND_VERSION" ]; then
@@ -415,13 +413,18 @@ jobs:
                 fi
 
                 for PATCH in $(seq "$MAX_PATCH" -1 0); do
-                  CANDIDATE_VERSION="v${MAJOR}.${MINOR}.${PATCH}.${DEPLOYMENT_MARKER}"
+
+                  # IMPORTANT:
+                  # Version format is 1.0.1.ReadyForDeployment
+                  # Not v1.0.1.ReadyForDeployment
+                  CANDIDATE_VERSION="${MAJOR}.${MINOR}.${PATCH}.${DEPLOYMENT_MARKER}"
 
                   SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
                   SAFE_VERSION=$(echo "$CANDIDATE_VERSION" | tr -cd '[:alnum:]_.-')
 
                   TARGET_PATH="$DOWNLOAD_DIR/$SAFE_ID/$SAFE_VERSION"
                   ZIP_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_VERSION}.zip"
+                  ERROR_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_VERSION}_sap_error.txt"
 
                   mkdir -p "$TARGET_PATH"
 
@@ -445,7 +448,6 @@ jobs:
                     echo "Version : $CANDIDATE_VERSION"
 
                     FOUND_VERSION="$CANDIDATE_VERSION"
-                    FOUND_ZIP_FILE="$ZIP_FILE"
 
                     if [ "$EXTRACT_ZIP" = "true" ]; then
                       EXTRACT_PATH="$TARGET_PATH/extracted"
@@ -481,6 +483,24 @@ jobs:
                     break
                   else
                     rm -f "$ZIP_FILE"
+
+                    if [ "$MAJOR" = "$MAX_MAJOR" ] && [ "$MINOR" = "$MAX_MINOR" ] && [ "$PATCH" = "$MAX_PATCH" ]; then
+                      echo "Highest attempted version did not download:"
+                      echo "$CANDIDATE_VERSION"
+                      echo "HTTP status: $HTTP_CODE"
+
+                      curl -sS \
+                        --connect-timeout 10 \
+                        --max-time 30 \
+                        --request GET "$DOWNLOAD_URL" \
+                        --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
+                        --header "Accept: application/json" \
+                        --output "$ERROR_FILE" || true
+
+                      echo "SAP response for highest attempted version:"
+                      cat "$ERROR_FILE" || true
+                    fi
+
                     rmdir "$TARGET_PATH" 2>/dev/null || true
                   fi
                 done
@@ -524,7 +544,8 @@ jobs:
 
           if [ "$MATCH_COUNT" -eq 0 ]; then
             echo "No iFlows were found with saved version pattern X.Y.Z.$DEPLOYMENT_MARKER."
-            echo "Try increasing MAX_MAJOR, MAX_MINOR, or MAX_PATCH."
+            echo "Please confirm SAP CPI saved version has exact format, for example:"
+            echo "1.0.1.ReadyForDeployment"
             exit 0
           fi
 
