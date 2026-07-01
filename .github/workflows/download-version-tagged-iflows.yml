@@ -195,7 +195,7 @@ jobs:
           MATCH_COUNT=$(jq length matched-iflows.json)
 
           if [ "$MATCH_COUNT" -eq 0 ]; then
-            echo "No iFlows found with version tag vX.Y.Z-$DEPLOYMENT_MARKER"
+            echo "No iFlows found with version tag vX.Y.Z.$DEPLOYMENT_MARKER"
             echo "Nothing to download."
             exit 0
           fi
