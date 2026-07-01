@@ -49,7 +49,25 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Debug GitHub secret availability
+        shell: bash
+        env:
+          SAP_BTP_TOKEN_URL: ${{ secrets.SAP_BTP_TOKEN_URL }}
+          SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
+        run: |
+          set -euo pipefail
 
+          if [ -z "${SAP_BTP_TOKEN_URL:-}" ]; then
+            echo "SAP_BTP_TOKEN_URL is EMPTY"
+          else
+            echo "SAP_BTP_TOKEN_URL is available"
+          fi
+
+          if [ -z "${SAP_CPI_API_BASE_URL:-}" ]; then
+            echo "SAP_CPI_API_BASE_URL is EMPTY"
+          else
+            echo "SAP_CPI_API_BASE_URL is available"
+          fi
       - name: Resolve runtime inputs
         shell: bash
         run: |
