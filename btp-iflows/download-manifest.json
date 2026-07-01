@@ -1,0 +1,22 @@
+{
+  "downloadedAtUtc": "2026-07-01T09:37:06Z",
+  "targetBranch": "feature/btp-iflow-backup",
+  "deploymentMarker": "ReadyForDeployment",
+  "acceptedDeploymentTagFormats": [
+    "vX.Y.Z.ReadyForDeployment",
+    "vX.Y.Z-ReadyForDeployment",
+    "vX.Y.Z_ReadyForDeployment"
+  ],
+  "sapDownloadVersion": "active",
+  "artifacts": [
+    {
+      "id": "first-iflow-v1.0.1-ReadyForDeployment",
+      "name": "first-iflow-v1.0.1-ReadyForDeployment",
+      "packageId": "DemoIntegrationPackage",
+      "versionFromSAP": "1.0.0",
+      "sapDownloadVersion": "active",
+      "deploymentTag": "v1.0.1-ReadyForDeployment",
+      "type": null
+    }
+  ]
+}
