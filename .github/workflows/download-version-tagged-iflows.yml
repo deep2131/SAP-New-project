@@ -125,9 +125,9 @@ jobs:
           deployment_marker = os.environ["DEPLOYMENT_MARKER"]
 
           # Strict pattern:
-          # v1.1.2-ReadyForDeployment
+          # v1.1.2.ReadyForDeployment
           version_tag_pattern = re.compile(
-              rf"^v\d+\.\d+\.\d+-{re.escape(deployment_marker)}$"
+              rf"^v\d+\.\d+\.\d+.{re.escape(deployment_marker)}$"
           )
 
           with open("artifacts-response.json", "r", encoding="utf-8") as file:
