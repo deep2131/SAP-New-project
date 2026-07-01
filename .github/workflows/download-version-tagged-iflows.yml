@@ -212,7 +212,35 @@ jobs:
         run: |
           echo "SAP artifacts returned by API:"
           jq -r '.d.results[] | "ID: \(.Id) | Name: \(.Name) | Version: \(.Version) | Description: \(.Description)"' artifacts-response.json   
-          
+      - name: Diagnose SAP CPI API endpoints
+        shell: bash
+        env:
+          SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
+        run: |
+          set -euo pipefail
+
+          SAP_CPI_API_BASE_URL="${SAP_CPI_API_BASE_URL%/}"
+
+          echo "Checking SAP CPI API base URL..."
+
+          echo "1. Testing metadata endpoint..."
+          curl -sS \
+            --request GET "$SAP_CPI_API_BASE_URL/api/v1/\$metadata" \
+            --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
+            --header "Accept: application/xml" \
+            --output metadata.xml \
+            --write-out "HTTP_CODE=%{http_code}\n"
+
+          echo "2. Testing artifact collection endpoint..."
+          curl -sS \
+            --request GET "$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts?\$top=5&\$format=json" \
+            --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
+            --header "Accept: application/json" \
+            --output artifacts-test.json \
+            --write-out "HTTP_CODE=%{http_code}\n"
+
+          echo "Artifact sample:"
+          cat artifacts-test.json | jq '.d.results[] | {Id, Name, Version, PackageId, ArtifactType, Type, Description}' || true   
       - name: Download matched iFlows from SAP BTP
         shell: bash
         env:
