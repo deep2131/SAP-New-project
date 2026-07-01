@@ -39,7 +39,7 @@ env:
 
 jobs:
   download-latest-ready-iflows:
-    name: Download latest vX.Y.Z.ReadyForDeployment iFlows
+    name: Download latest X.Y.Z.ReadyForDeployment iFlows
     runs-on: ubuntu-latest
 
     # If your secrets are stored under GitHub Environment secrets,
@@ -370,7 +370,7 @@ jobs:
             exit 0
           fi
 
-      - name: Download latest vX.Y.Z.ReadyForDeployment version per iFlow
+      - name: Download latest X.Y.Z.ReadyForDeployment version per iFlow
         shell: bash
         env:
           SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
@@ -380,7 +380,7 @@ jobs:
           SAP_CPI_API_BASE_URL="${SAP_CPI_API_BASE_URL%/}"
 
           echo "Downloading latest saved version per iFlow using pattern:"
-          echo "vX.Y.Z.$DEPLOYMENT_MARKER"
+          echo "X.Y.Z.$DEPLOYMENT_MARKER"
           echo "Scanning from highest to lowest:"
           echo "Major: $MAX_MAJOR to 0"
           echo "Minor: $MAX_MINOR to 0"
@@ -511,7 +511,7 @@ jobs:
                   id: $id,
                   name: $name,
                   packageId: $packageId,
-                  status: "No matching vX.Y.Z.ReadyForDeployment version found"
+                  status: "No matching X.Y.Z.ReadyForDeployment version found"
                 }]' scan-summary.json > "$TMP_SUMMARY_FILE"
             fi
 
@@ -523,7 +523,7 @@ jobs:
           echo "Total downloaded latest iFlow versions: $MATCH_COUNT"
 
           if [ "$MATCH_COUNT" -eq 0 ]; then
-            echo "No iFlows were found with saved version pattern vX.Y.Z.$DEPLOYMENT_MARKER."
+            echo "No iFlows were found with saved version pattern X.Y.Z.$DEPLOYMENT_MARKER."
             echo "Try increasing MAX_MAJOR, MAX_MINOR, or MAX_PATCH."
             exit 0
           fi
@@ -534,7 +534,7 @@ jobs:
           set -euo pipefail
 
           MANIFEST_FILE="$DOWNLOAD_DIR/download-manifest.json"
-          ACCEPTED_VERSION_FORMAT="vX.Y.Z.${DEPLOYMENT_MARKER}"
+          ACCEPTED_VERSION_FORMAT="X.Y.Z.${DEPLOYMENT_MARKER}"
 
           jq \
             --arg downloadedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
@@ -552,8 +552,8 @@ jobs:
                 maxMinor: ($maxMinor | tonumber),
                 maxPatch: ($maxPatch | tonumber)
               },
-              selectionRule: "For each discovered iFlow, pipeline scans saved versions from highest to lowest and downloads the first matching vX.Y.Z.ReadyForDeployment version.",
-              downloadRule: "Download URL uses IntegrationDesigntimeArtifacts(Id=<id>,Version=<vX.Y.Z.ReadyForDeployment>)/$value.",
+              selectionRule: "For each discovered iFlow, pipeline scans saved versions from highest to lowest and downloads the first matching X.Y.Z.ReadyForDeployment version.",
+              downloadRule: "Download URL uses IntegrationDesigntimeArtifacts(Id=<id>,Version=<X.Y.Z.ReadyForDeployment>)/$value.",
               artifacts: .
             }' matched-iflows.json > "$MANIFEST_FILE"
 
@@ -572,7 +572,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Download latest SAP BTP iFlows saved as vX.Y.Z.$DEPLOYMENT_MARKER"
+          git commit -m "Download latest SAP BTP iFlows saved as X.Y.Z.$DEPLOYMENT_MARKER"
           git push origin "$TARGET_BRANCH"
 
           echo "Downloaded iFlows pushed to branch: $TARGET_BRANCH"
