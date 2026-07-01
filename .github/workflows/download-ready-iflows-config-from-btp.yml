@@ -1,4 +1,4 @@
-name: Download ReadyForDeployment iFlows from SAP BTP
+name: Download ReadyForDeployment (read config) iFlows from SAP BTP
 
 on:
   workflow_dispatch:
