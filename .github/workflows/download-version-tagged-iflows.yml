@@ -97,7 +97,7 @@ jobs:
           echo "::add-mask::$ACCESS_TOKEN"
           echo "SAP_ACCESS_TOKEN=$ACCESS_TOKEN" >> $GITHUB_ENV
 
-      - name: Fetch and filter iFlows with version deployment tag
+      - name: Fetch and filter iFlows with deployment version tag
         shell: bash
         env:
           SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
@@ -105,7 +105,7 @@ jobs:
           set -euo pipefail
 
           if [ -z "${SAP_CPI_API_BASE_URL:-}" ]; then
-            echo "ERROR: SAP_CPI_API_BASE_URL secret is missing or empty."
+            echo "ERROR: SAP_CPI_API_BASE_URL is missing."
             exit 1
           fi
 
@@ -121,20 +121,20 @@ jobs:
             --header "Accept: application/json" \
             --output artifacts-response.json
 
-          echo "Filtering only iFlows where version matches:"
-          echo "vX.Y.Z.ReadyForDeployment"
+          echo "Filtering iFlows with allowed deployment tag formats..."
 
           python3 << 'PY'
           import json
-          import os
           import re
 
           deployment_marker = "ReadyForDeployment"
 
-          # Accepted format:
+          # Accepts:
           # v1.1.2.ReadyForDeployment
-          version_pattern = re.compile(
-              rf"^v\d+\.\d+\.\d+\.{re.escape(deployment_marker)}$"
+          # v1.1.2-ReadyForDeployment
+          # v1.1.2_ReadyForDeployment
+          deployment_tag_pattern = re.compile(
+              rf"v\d+\.\d+\.\d+[.\-_]{re.escape(deployment_marker)}"
           )
 
           with open("artifacts-response.json", "r", encoding="utf-8") as file:
@@ -148,37 +148,41 @@ jobs:
           for artifact in artifacts:
               artifact_id = artifact.get("Id")
               artifact_name = artifact.get("Name", artifact_id)
-              artifact_version = artifact.get("Version")
-              artifact_type = artifact.get("ArtifactType") or artifact.get("Type")
 
-              if not artifact_id:
-                  skipped.append({
-                      "reason": "Missing artifact ID",
-                      "artifact": artifact
-                  })
-                  continue
+              # This is the real SAP CPI version to be used in download URL.
+              # Usually this may be "active".
+              sap_version = artifact.get("Version") or "active"
 
-              if not artifact_version:
-                  skipped.append({
-                      "id": artifact_id,
-                      "name": artifact_name,
-                      "reason": "Missing version"
-                  })
-                  continue
+              searchable_fields = [
+                  artifact.get("Version"),
+                  artifact.get("Description"),
+                  artifact.get("Name"),
+                  artifact.get("Tags"),
+                  artifact.get("Tag"),
+                  artifact.get("Labels"),
+                  artifact.get("CustomTags"),
+                  artifact.get("Keywords"),
+              ]
 
-              if version_pattern.match(artifact_version):
+              searchable_text = " ".join(
+                  str(field) for field in searchable_fields if field
+              )
+
+              deployment_tag_match = deployment_tag_pattern.search(searchable_text)
+
+              if artifact_id and deployment_tag_match:
                   matched.append({
                       "id": artifact_id,
                       "name": artifact_name,
-                      "version": artifact_version,
-                      "type": artifact_type
+                      "sapVersion": sap_version,
+                      "deploymentTag": deployment_tag_match.group(0)
                   })
               else:
                   skipped.append({
                       "id": artifact_id,
                       "name": artifact_name,
-                      "version": artifact_version,
-                      "reason": "Version does not match vX.Y.Z.ReadyForDeployment"
+                      "sapVersion": sap_version,
+                      "reason": "No valid ReadyForDeployment version tag found"
                   })
 
           with open("matched-iflows.json", "w", encoding="utf-8") as file:
@@ -190,19 +194,17 @@ jobs:
           print(f"Matched iFlows: {len(matched)}")
           print(f"Skipped iFlows: {len(skipped)}")
 
-          if matched:
-              print("Matched artifacts:")
-              for item in matched:
-                  print(f"- {item['id']} | Version: {item['version']}")
-          else:
-              print("No iFlows found with version vX.Y.Z.ReadyForDeployment")
+          for item in matched:
+              print(
+                  f"- {item['id']} | SAP Version: {item['sapVersion']} | "
+                  f"Deployment Tag: {item['deploymentTag']}"
+              )
           PY
 
           MATCH_COUNT=$(jq length matched-iflows.json)
 
           if [ "$MATCH_COUNT" -eq 0 ]; then
-            echo "No iFlows found with version pattern vX.Y.Z.ReadyForDeployment"
-            echo "Nothing to download."
+            echo "No iFlows found with valid deployment version tag."
             exit 0
           fi
           
