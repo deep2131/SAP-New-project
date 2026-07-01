@@ -350,7 +350,7 @@ jobs:
             exit 0
           fi
 
-      - name: Try downloading all dynamic ReadyForDeployment versions
+      - name: Try downloading latest ReadyForDeployment version per iFlow
         shell: bash
         env:
           SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
@@ -359,11 +359,11 @@ jobs:
 
           SAP_CPI_API_BASE_URL="${SAP_CPI_API_BASE_URL%/}"
 
-          echo "Scanning versions using pattern:"
-          echo "vX.Y.Z.$DEPLOYMENT_MARKER"
-          echo "Major range: 0 to $MAX_MAJOR"
-          echo "Minor range: 0 to $MAX_MINOR"
-          echo "Patch range: 0 to $MAX_PATCH"
+          echo "Scanning latest ReadyForDeployment version per iFlow."
+          echo "Pattern: vX.Y.Z.$DEPLOYMENT_MARKER"
+          echo "Major range: $MAX_MAJOR down to 0"
+          echo "Minor range: $MAX_MINOR down to 0"
+          echo "Patch range: $MAX_PATCH down to 0"
 
           echo "[]" > matched-iflows.json
           echo "[]" > scan-summary.json
@@ -374,18 +374,25 @@ jobs:
             PACKAGE_ID=$(echo "$artifact" | jq -r '.packageId // "NA"')
 
             echo "------------------------------------------------------------"
-            echo "Scanning versions for iFlow"
+            echo "Scanning latest ReadyForDeployment version for iFlow"
             echo "ID      : $IFLOW_ID"
             echo "Name    : $IFLOW_NAME"
             echo "Package : $PACKAGE_ID"
             echo "------------------------------------------------------------"
 
-            FOUND_COUNT_FOR_IFLOW=0
+            FOUND_VERSION=""
 
-            for MAJOR in $(seq 0 "$MAX_MAJOR"); do
-              for MINOR in $(seq 0 "$MAX_MINOR"); do
-                for PATCH in $(seq 0 "$MAX_PATCH"); do
+            for MAJOR in $(seq "$MAX_MAJOR" -1 0); do
+              if [ -n "$FOUND_VERSION" ]; then
+                break
+              fi
 
+              for MINOR in $(seq "$MAX_MINOR" -1 0); do
+                if [ -n "$FOUND_VERSION" ]; then
+                  break
+                fi
+
+                for PATCH in $(seq "$MAX_PATCH" -1 0); do
                   CANDIDATE_VERSION="v${MAJOR}.${MINOR}.${PATCH}.${DEPLOYMENT_MARKER}"
 
                   SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
@@ -402,6 +409,8 @@ jobs:
                   DOWNLOAD_URL="$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts(Id='$ODATA_ID',Version='$ODATA_VERSION')/\$value"
 
                   HTTP_CODE=$(curl -sS \
+                    --connect-timeout 10 \
+                    --max-time 30 \
                     --request GET "$DOWNLOAD_URL" \
                     --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
                     --header "Accept: application/zip" \
@@ -409,9 +418,11 @@ jobs:
                     --write-out "%{http_code}")
 
                   if [ "$HTTP_CODE" = "200" ] && [ -s "$ZIP_FILE" ]; then
-                    echo "Downloaded: $IFLOW_ID | Version: $CANDIDATE_VERSION"
+                    echo "Downloaded latest matching version:"
+                    echo "iFlow   : $IFLOW_ID"
+                    echo "Version : $CANDIDATE_VERSION"
 
-                    FOUND_COUNT_FOR_IFLOW=$((FOUND_COUNT_FOR_IFLOW + 1))
+                    FOUND_VERSION="$CANDIDATE_VERSION"
 
                     if [ "$EXTRACT_ZIP" = "true" ]; then
                       EXTRACT_PATH="$TARGET_PATH/extracted"
@@ -443,45 +454,54 @@ jobs:
                       }]' matched-iflows.json > "$TMP_FILE"
 
                     mv "$TMP_FILE" matched-iflows.json
+
+                    break
                   else
                     rm -f "$ZIP_FILE"
                     rmdir "$TARGET_PATH" 2>/dev/null || true
                   fi
-
                 done
               done
             done
 
             TMP_SUMMARY_FILE=$(mktemp)
 
-            jq \
-              --arg id "$IFLOW_ID" \
-              --arg name "$IFLOW_NAME" \
-              --arg packageId "$PACKAGE_ID" \
-              --arg foundCount "$FOUND_COUNT_FOR_IFLOW" \
-              '. + [{
-                id: $id,
-                name: $name,
-                packageId: $packageId,
-                downloadedVersionCount: ($foundCount | tonumber)
-              }]' scan-summary.json > "$TMP_SUMMARY_FILE"
+            if [ -n "$FOUND_VERSION" ]; then
+              jq \
+                --arg id "$IFLOW_ID" \
+                --arg name "$IFLOW_NAME" \
+                --arg packageId "$PACKAGE_ID" \
+                --arg foundVersion "$FOUND_VERSION" \
+                '. + [{
+                  id: $id,
+                  name: $name,
+                  packageId: $packageId,
+                  status: "Downloaded",
+                  foundVersion: $foundVersion
+                }]' scan-summary.json > "$TMP_SUMMARY_FILE"
+            else
+              jq \
+                --arg id "$IFLOW_ID" \
+                --arg name "$IFLOW_NAME" \
+                --arg packageId "$PACKAGE_ID" \
+                '. + [{
+                  id: $id,
+                  name: $name,
+                  packageId: $packageId,
+                  status: "No matching ReadyForDeployment version found"
+                }]' scan-summary.json > "$TMP_SUMMARY_FILE"
+            fi
 
             mv "$TMP_SUMMARY_FILE" scan-summary.json
-
-            if [ "$FOUND_COUNT_FOR_IFLOW" -eq 0 ]; then
-              echo "No ReadyForDeployment version found for iFlow: $IFLOW_ID"
-            else
-              echo "Downloaded $FOUND_COUNT_FOR_IFLOW version(s) for iFlow: $IFLOW_ID"
-            fi
           done
 
           MATCH_COUNT=$(jq length matched-iflows.json)
 
-          echo "Total downloaded iFlow versions: $MATCH_COUNT"
+          echo "Total downloaded iFlows: $MATCH_COUNT"
 
           if [ "$MATCH_COUNT" -eq 0 ]; then
             echo "No iFlow versions found with pattern vX.Y.Z.$DEPLOYMENT_MARKER in configured range."
-            echo "Increase max_major, max_minor, or max_patch and rerun."
+            echo "Try increasing max_major, max_minor, or max_patch if required."
             exit 0
           fi
 
