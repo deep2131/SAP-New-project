@@ -1,4 +1,4 @@
-name: Download Version-Saved ReadyForDeployment iFlows from SAP BTP
+name: Download ReadyForDeployment iFlows from SAP BTP
 
 on:
   workflow_dispatch:
@@ -24,16 +24,17 @@ permissions:
 env:
   TARGET_BRANCH: feature/btp-iflow-backup
   DEPLOYMENT_MARKER: ReadyForDeployment
+  SAP_DOWNLOAD_VERSION: active
   DOWNLOAD_DIR: btp-iflows
   EXTRACT_ZIP: "true"
 
 jobs:
   download-ready-iflows:
-    name: Download iFlows saved as vX.Y.Z.ReadyForDeployment
+    name: Download iFlows where saved version is vX.Y.Z.ReadyForDeployment
     runs-on: ubuntu-latest
 
-    # Uncomment only if your secrets are stored under GitHub Environment secrets.
-    # Replace dev with your actual environment name.
+    # If your secrets are stored under GitHub Environment secrets,
+    # uncomment below and replace dev with your actual environment name.
     environment: dev
 
     steps:
@@ -54,6 +55,7 @@ jobs:
 
           echo "Target branch resolved: $TARGET_BRANCH"
           echo "Deployment marker resolved: $DEPLOYMENT_MARKER"
+          echo "SAP download version: $SAP_DOWNLOAD_VERSION"
 
       - name: Validate required GitHub secrets
         shell: bash
@@ -87,15 +89,21 @@ jobs:
             exit 1
           fi
 
-          if [[ "$SAP_BTP_TOKEN_URL" != https://* ]]; then
-            echo "ERROR: SAP_BTP_TOKEN_URL must start with https://"
-            exit 1
-          fi
+          case "$SAP_BTP_TOKEN_URL" in
+            https://*) ;;
+            *)
+              echo "ERROR: SAP_BTP_TOKEN_URL must start with https://"
+              exit 1
+              ;;
+          esac
 
-          if [[ "$SAP_CPI_API_BASE_URL" != https://* ]]; then
-            echo "ERROR: SAP_CPI_API_BASE_URL must start with https://"
-            exit 1
-          fi
+          case "$SAP_CPI_API_BASE_URL" in
+            https://*) ;;
+            *)
+              echo "ERROR: SAP_CPI_API_BASE_URL must start with https://"
+              exit 1
+              ;;
+          esac
 
           echo "All required secrets are configured."
 
@@ -133,11 +141,12 @@ jobs:
           set -euo pipefail
 
           SAP_BTP_TOKEN_URL="${SAP_BTP_TOKEN_URL%/}"
+          TOKEN_ENDPOINT="$SAP_BTP_TOKEN_URL"
 
-          if [[ "$SAP_BTP_TOKEN_URL" == */oauth/token ]]; then
-            TOKEN_ENDPOINT="$SAP_BTP_TOKEN_URL"
-          else
-            TOKEN_ENDPOINT="$SAP_BTP_TOKEN_URL/oauth/token"
+          TOKEN_ENDPOINT_WITHOUT_SUFFIX="${TOKEN_ENDPOINT%/oauth/token}"
+
+          if [ "$TOKEN_ENDPOINT_WITHOUT_SUFFIX" = "$TOKEN_ENDPOINT" ]; then
+            TOKEN_ENDPOINT="$TOKEN_ENDPOINT/oauth/token"
           fi
 
           echo "Requesting SAP OAuth token..."
@@ -173,7 +182,7 @@ jobs:
 
           echo "SAP OAuth token generated successfully."
 
-      - name: Fetch and filter iFlows saved as version vX.Y.Z.ReadyForDeployment
+      - name: Fetch and filter iFlows using package fallback
         shell: bash
         env:
           SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
@@ -284,9 +293,11 @@ jobs:
           echo "Total fetched artifacts:"
           jq '.d.results | length' artifacts-response.json
 
-          echo "Filtering ONLY by SAP saved Version field."
-          echo "Accepted version format:"
+          echo "Filtering only by SAP artifact Version field."
+          echo "Accepted saved version format:"
           echo "vX.Y.Z.$DEPLOYMENT_MARKER"
+          echo "Download version used:"
+          echo "$SAP_DOWNLOAD_VERSION"
 
           python3 << 'PY'
           import json
@@ -294,9 +305,8 @@ jobs:
           import re
 
           deployment_marker = os.environ.get("DEPLOYMENT_MARKER", "ReadyForDeployment")
+          sap_download_version = os.environ.get("SAP_DOWNLOAD_VERSION", "active").strip() or "active"
 
-          # Strict match ONLY on SAP saved Version field:
-          # v1.1.2.ReadyForDeployment
           version_pattern = re.compile(
               rf"^v\d+\.\d+\.\d+\.{re.escape(deployment_marker)}$"
           )
@@ -334,9 +344,6 @@ jobs:
                   })
                   continue
 
-              # Important:
-              # Match ONLY the SAP artifact Version field.
-              # Do NOT check Name, Description, Tags, Labels, or Keywords.
               if not version_pattern.match(artifact_version):
                   skipped.append({
                       "id": artifact_id,
@@ -353,11 +360,7 @@ jobs:
                   "name": artifact_name,
                   "packageId": package_id,
                   "versionFromSAP": artifact_version,
-
-                  # Since iFlow is saved as version vX.Y.Z.ReadyForDeployment,
-                  # use the same exact SAP Version in download URL.
-                  "sapDownloadVersion": artifact_version,
-
+                  "sapDownloadVersion": sap_download_version,
                   "deploymentTag": artifact_version,
                   "type": artifact_type
               })
@@ -380,7 +383,7 @@ jobs:
                       f"Name: {item['name']} | "
                       f"Package: {item.get('packageId')} | "
                       f"SAP Saved Version: {item['versionFromSAP']} | "
-                      f"SAP Download Version: {item['sapDownloadVersion']}"
+                      f"Download Version: {item['sapDownloadVersion']}"
                   )
           else:
               print("No iFlows found with SAP saved version vX.Y.Z.ReadyForDeployment.")
@@ -400,7 +403,7 @@ jobs:
           set -euo pipefail
 
           echo "Matched iFlows selected for download:"
-          jq -r '.[] | "ID: \(.id) | Name: \(.name) | Package: \(.packageId) | SAP Saved Version: \(.versionFromSAP) | SAP Download Version: \(.sapDownloadVersion)"' matched-iflows.json
+          jq -r '.[] | "ID: \(.id) | Name: \(.name) | Package: \(.packageId) | SAP Saved Version: \(.versionFromSAP) | Download Version: \(.sapDownloadVersion)"' matched-iflows.json
 
       - name: Download matched iFlows from SAP BTP
         shell: bash
@@ -415,15 +418,15 @@ jobs:
             IFLOW_ID=$(echo "$artifact" | jq -r '.id')
             IFLOW_NAME=$(echo "$artifact" | jq -r '.name')
             PACKAGE_ID=$(echo "$artifact" | jq -r '.packageId // "NA"')
+            SAP_SAVED_VERSION=$(echo "$artifact" | jq -r '.versionFromSAP')
             SAP_DOWNLOAD_VERSION_ITEM=$(echo "$artifact" | jq -r '.sapDownloadVersion')
-            DEPLOYMENT_TAG=$(echo "$artifact" | jq -r '.deploymentTag')
 
             SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
-            SAFE_VERSION=$(echo "$SAP_DOWNLOAD_VERSION_ITEM" | tr -cd '[:alnum:]_.-')
+            SAFE_SAVED_VERSION=$(echo "$SAP_SAVED_VERSION" | tr -cd '[:alnum:]_.-')
 
-            TARGET_PATH="$DOWNLOAD_DIR/$SAFE_ID/$SAFE_VERSION"
-            ZIP_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_VERSION}.zip"
-            ERROR_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_VERSION}_sap_error.txt"
+            TARGET_PATH="$DOWNLOAD_DIR/$SAFE_ID/$SAFE_SAVED_VERSION"
+            ZIP_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_SAVED_VERSION}.zip"
+            ERROR_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_SAVED_VERSION}_sap_error.txt"
 
             mkdir -p "$TARGET_PATH"
 
@@ -437,9 +440,9 @@ jobs:
             echo "ID                   : $IFLOW_ID"
             echo "Name                 : $IFLOW_NAME"
             echo "Package              : $PACKAGE_ID"
-            echo "SAP Saved Version    : $SAP_DOWNLOAD_VERSION_ITEM"
-            echo "Deployment Tag       : $DEPLOYMENT_TAG"
-            echo "URL Pattern          : /api/v1/IntegrationDesigntimeArtifacts(Id='<ID>',Version='<VERSION>')/\$value"
+            echo "SAP Saved Version    : $SAP_SAVED_VERSION"
+            echo "Download Version     : $SAP_DOWNLOAD_VERSION_ITEM"
+            echo "URL Pattern          : /api/v1/IntegrationDesigntimeArtifacts(Id='<ID>',Version='active')/\$value"
             echo "------------------------------------------------------------"
 
             HTTP_CODE=$(curl -sS \
@@ -467,10 +470,11 @@ jobs:
 
               echo ""
               echo "Troubleshooting hints:"
-              echo "1. Confirm this exact SAP saved version exists: $SAP_DOWNLOAD_VERSION_ITEM"
-              echo "2. Confirm artifact is an actual Integration Flow."
-              echo "3. Confirm OAuth client has required Cloud Integration API roles."
-              echo "4. Confirm SAP_CPI_API_BASE_URL is the CPI API tenant URL."
+              echo "1. The iFlow matched saved version: $SAP_SAVED_VERSION"
+              echo "2. Download attempted with Version='active'."
+              echo "3. Confirm the iFlow has an active version available."
+              echo "4. Confirm OAuth client has required Cloud Integration API roles."
+              echo "5. Confirm SAP_CPI_API_BASE_URL is correct CPI API tenant URL."
               exit 1
             fi
 
@@ -511,17 +515,21 @@ jobs:
             --arg marker "$DEPLOYMENT_MARKER" \
             --arg targetBranch "$TARGET_BRANCH" \
             --arg acceptedVersionFormat "$ACCEPTED_VERSION_FORMAT" \
+            --arg sapDownloadVersion "$SAP_DOWNLOAD_VERSION" \
             '{
               downloadedAtUtc: $downloadedAt,
               targetBranch: $targetBranch,
               deploymentMarker: $marker,
               acceptedDeploymentVersionFormat: $acceptedVersionFormat,
+              sapDownloadVersionUsedForDownload: $sapDownloadVersion,
               versionMatchRule: "Only SAP artifact Version field is checked. Name, Description, Tags, Labels, and Keywords are ignored.",
+              downloadRule: "Matched iFlows are downloaded using SAP artifact Version active.",
               artifacts: .
             }' matched-iflows.json > "$MANIFEST_FILE"
 
           echo "Download manifest created:"
           cat "$MANIFEST_FILE"
+
       - name: Commit and push downloaded iFlows
         shell: bash
         run: |
@@ -534,7 +542,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Download SAP BTP iFlows saved as version vX.Y.Z.$DEPLOYMENT_MARKER"
+          git commit -m "Download SAP BTP iFlows saved as vX.Y.Z.$DEPLOYMENT_MARKER"
           git push origin "$TARGET_BRANCH"
 
           echo "Downloaded iFlows pushed to branch: $TARGET_BRANCH"
