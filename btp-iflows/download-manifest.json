@@ -1,10 +1,10 @@
 {
-  "downloadedAtUtc": "2026-07-01T12:34:59Z",
+  "downloadedAtUtc": "2026-07-01T12:40:36Z",
   "targetBranch": "feature/btp-iflow-backup",
   "registryFile": ".config/ready-iflows.json",
-  "versionRule": "Only versions matching vX.Y.Z.ReadyForDeployment are allowed.",
+  "versionRule": "Only versions matching X.Y.Z.ReadyForDeployment are allowed.",
   "selectionRule": "Pipeline downloads only iFlows explicitly listed in .config/ready-iflows.json.",
-  "downloadRule": "Download URL uses IntegrationDesigntimeArtifacts(Id=<id>,Version=<vX.Y.Z.ReadyForDeployment>)/$value.",
+  "downloadRule": "Download URL uses IntegrationDesigntimeArtifacts(Id=<id>,Version=<X.Y.Z.ReadyForDeployment>)/$value.",
   "artifacts": [
     {
       "id": "iflow2",
