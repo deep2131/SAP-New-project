@@ -1,0 +1,286 @@
+name: Download Version Tagged iFlows from SAP BTP
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: "Feature branch where downloaded iFlows will be pushed"
+        required: false
+        default: "feature/btp-iflow-backup"
+      deployment_marker:
+        description: "Version tag suffix"
+        required: false
+        default: "ReadyForDeployment"
+
+  schedule:
+    # Runs twice daily at 09:00 and 18:00 IST
+    # GitHub cron uses UTC
+    - cron: "30 3,12 * * *"
+
+permissions:
+  contents: write
+
+env:
+  TARGET_BRANCH: feature/btp-iflow-backup
+  DEPLOYMENT_MARKER: ReadyForDeployment
+  DOWNLOAD_DIR: btp-iflows
+  EXTRACT_ZIP: "true"
+
+jobs:
+  download-version-tagged-iflows:
+    name: Download iFlows with version deployment tag
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve runtime inputs
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "TARGET_BRANCH=${{ github.event.inputs.target_branch }}" >> $GITHUB_ENV
+            echo "DEPLOYMENT_MARKER=${{ github.event.inputs.deployment_marker }}" >> $GITHUB_ENV
+          fi
+
+          echo "Target branch: $TARGET_BRANCH"
+          echo "Deployment marker: $DEPLOYMENT_MARKER"
+
+      - name: Configure Git
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create or switch to target feature branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin
+
+          if git ls-remote --exit-code --heads origin "$TARGET_BRANCH"; then
+            echo "Branch exists remotely. Checking out $TARGET_BRANCH"
+            git checkout "$TARGET_BRANCH"
+            git pull origin "$TARGET_BRANCH"
+          else
+            echo "Branch does not exist. Creating $TARGET_BRANCH"
+            git checkout -b "$TARGET_BRANCH"
+          fi
+
+      - name: Get SAP BTP OAuth token
+        shell: bash
+        env:
+          SAP_BTP_TOKEN_URL: ${{ secrets.SAP_BTP_TOKEN_URL }}
+          SAP_BTP_OAUTH_CLIENT_ID: ${{ secrets.SAP_BTP_OAUTH_CLIENT_ID }}
+          SAP_BTP_OAUTH_CLIENT_SECRET: ${{ secrets.SAP_BTP_OAUTH_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+
+          TOKEN_RESPONSE=$(curl -sS --fail \
+            --request POST "$SAP_BTP_TOKEN_URL/oauth/token" \
+            --user "$SAP_BTP_OAUTH_CLIENT_ID:$SAP_BTP_OAUTH_CLIENT_SECRET" \
+            --header "Content-Type: application/x-www-form-urlencoded" \
+            --data "grant_type=client_credentials")
+
+          ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
+
+          if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
+            echo "Failed to fetch OAuth token from SAP BTP"
+            echo "$TOKEN_RESPONSE"
+            exit 1
+          fi
+
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "SAP_ACCESS_TOKEN=$ACCESS_TOKEN" >> $GITHUB_ENV
+
+      - name: Fetch and filter iFlows with version deployment tag
+        shell: bash
+        env:
+          SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$DOWNLOAD_DIR"
+
+          echo "Fetching integration design-time artifacts from SAP BTP..."
+
+          curl -sS --fail \
+            --request GET "$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts?\$format=json" \
+            --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
+            --header "Accept: application/json" \
+            --output artifacts-response.json
+
+          echo "Filtering only iFlows where Version matches:"
+          echo "v<major>.<minor>.<patch>-$DEPLOYMENT_MARKER"
+          echo "Example: v1.1.2-$DEPLOYMENT_MARKER"
+
+          python3 << 'PY'
+          import json
+          import os
+          import re
+
+          deployment_marker = os.environ["DEPLOYMENT_MARKER"]
+
+          # Strict pattern:
+          # v1.1.2-ReadyForDeployment
+          version_tag_pattern = re.compile(
+              rf"^v\d+\.\d+\.\d+-{re.escape(deployment_marker)}$"
+          )
+
+          with open("artifacts-response.json", "r", encoding="utf-8") as file:
+              payload = json.load(file)
+
+          artifacts = payload.get("d", {}).get("results", [])
+
+          matched = []
+          skipped = []
+
+          for artifact in artifacts:
+              artifact_id = artifact.get("Id")
+              artifact_name = artifact.get("Name", artifact_id)
+              version = artifact.get("Version")
+              artifact_type = artifact.get("ArtifactType") or artifact.get("Type")
+
+              if not artifact_id:
+                  skipped.append({
+                      "reason": "Missing artifact ID",
+                      "artifact": artifact
+                  })
+                  continue
+
+              if not version:
+                  skipped.append({
+                      "id": artifact_id,
+                      "name": artifact_name,
+                      "reason": "Missing version"
+                  })
+                  continue
+
+              if version_tag_pattern.match(version):
+                  matched.append({
+                      "id": artifact_id,
+                      "name": artifact_name,
+                      "version": version,
+                      "type": artifact_type
+                  })
+              else:
+                  skipped.append({
+                      "id": artifact_id,
+                      "name": artifact_name,
+                      "version": version,
+                      "reason": "Version does not match deployment tag pattern"
+                  })
+
+          with open("matched-iflows.json", "w", encoding="utf-8") as file:
+              json.dump(matched, file, indent=2)
+
+          with open("skipped-iflows.json", "w", encoding="utf-8") as file:
+              json.dump(skipped, file, indent=2)
+
+          print(f"Matched iFlows: {len(matched)}")
+          print(f"Skipped iFlows: {len(skipped)}")
+
+          if matched:
+              print("Matched artifacts:")
+              for item in matched:
+                  print(f"- {item['id']} | Version: {item['version']}")
+          else:
+              print("No iFlows found with valid version deployment tag.")
+          PY
+
+          MATCH_COUNT=$(jq length matched-iflows.json)
+
+          if [ "$MATCH_COUNT" -eq 0 ]; then
+            echo "No iFlows found with version tag vX.Y.Z-$DEPLOYMENT_MARKER"
+            echo "Nothing to download."
+            exit 0
+          fi
+
+      - name: Download matched iFlows from SAP BTP
+        shell: bash
+        env:
+          SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
+        run: |
+          set -euo pipefail
+
+          jq -c '.[]' matched-iflows.json | while read -r artifact; do
+            IFLOW_ID=$(echo "$artifact" | jq -r '.id')
+            IFLOW_NAME=$(echo "$artifact" | jq -r '.name')
+            IFLOW_VERSION=$(echo "$artifact" | jq -r '.version')
+
+            SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
+            SAFE_VERSION=$(echo "$IFLOW_VERSION" | tr -cd '[:alnum:]_.-')
+
+            TARGET_PATH="$DOWNLOAD_DIR/$SAFE_ID/$SAFE_VERSION"
+            ZIP_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_VERSION}.zip"
+
+            mkdir -p "$TARGET_PATH"
+
+            ENCODED_ID=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$IFLOW_ID''', safe=''))")
+            ENCODED_VERSION=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$IFLOW_VERSION''', safe=''))")
+
+            DOWNLOAD_URL="$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts(Id='$ENCODED_ID',Version='$ENCODED_VERSION')/\$value"
+
+            echo "Downloading iFlow:"
+            echo "ID      : $IFLOW_ID"
+            echo "Name    : $IFLOW_NAME"
+            echo "Version : $IFLOW_VERSION"
+
+            curl -sS --fail \
+              --request GET "$DOWNLOAD_URL" \
+              --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
+              --header "Accept: application/zip" \
+              --output "$ZIP_FILE"
+
+            if [ ! -s "$ZIP_FILE" ]; then
+              echo "Downloaded file is empty for $IFLOW_ID version $IFLOW_VERSION"
+              exit 1
+            fi
+
+            if [ "$EXTRACT_ZIP" = "true" ]; then
+              EXTRACT_PATH="$TARGET_PATH/extracted"
+              rm -rf "$EXTRACT_PATH"
+              mkdir -p "$EXTRACT_PATH"
+              unzip -q "$ZIP_FILE" -d "$EXTRACT_PATH"
+            fi
+
+            echo "Downloaded successfully: $ZIP_FILE"
+          done
+
+      - name: Create download manifest
+        shell: bash
+        run: |
+          MANIFEST_FILE="$DOWNLOAD_DIR/download-manifest.json"
+
+          jq --arg downloadedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+             --arg marker "$DEPLOYMENT_MARKER" \
+             --arg branch "$TARGET_BRANCH" \
+             '{
+                downloadedAtUtc: $downloadedAt,
+                deploymentMarker: $marker,
+                acceptedVersionPattern: "v<major>.<minor>.<patch>-" + $marker,
+                targetBranch: $branch,
+                downloadedArtifacts: .
+              }' matched-iflows.json > "$MANIFEST_FILE"
+
+          echo "Manifest created:"
+          cat "$MANIFEST_FILE"
+
+      - name: Commit and push downloaded iFlows
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add "$DOWNLOAD_DIR"
+
+          if git diff --staged --quiet; then
+            echo "No changes detected. Nothing to commit."
+            exit 0
+          fi
+
+          git commit -m "Download BTP iFlows with version tag $DEPLOYMENT_MARKER"
+
+          git push origin "$TARGET_BRANCH"
