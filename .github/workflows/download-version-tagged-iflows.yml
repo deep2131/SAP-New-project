@@ -213,6 +213,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          SAP_CPI_API_BASE_URL="${SAP_CPI_API_BASE_URL%/}"
+
           jq -c '.[]' matched-iflows.json | while read -r artifact; do
             IFLOW_ID=$(echo "$artifact" | jq -r '.id')
             IFLOW_NAME=$(echo "$artifact" | jq -r '.name')
@@ -236,11 +238,22 @@ jobs:
             echo "Name    : $IFLOW_NAME"
             echo "Version : $IFLOW_VERSION"
 
-            curl -sS --fail \
+            HTTP_CODE=$(curl -sS \
               --request GET "$DOWNLOAD_URL" \
               --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
               --header "Accept: application/zip" \
-              --output "$ZIP_FILE"
+              --output "$ZIP_FILE" \
+              --write-out "%{http_code}")
+
+            echo "HTTP status: $HTTP_CODE"
+
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "Download failed for $IFLOW_ID version $IFLOW_VERSION"
+              echo "Expected URL pattern:"
+              echo "$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts(Id='<ID>',Version='<VERSION>')/\$value"
+              rm -f "$ZIP_FILE"
+              exit 1
+            fi
 
             if [ ! -s "$ZIP_FILE" ]; then
               echo "Downloaded file is empty for $IFLOW_ID version $IFLOW_VERSION"
