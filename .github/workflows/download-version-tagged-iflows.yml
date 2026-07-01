@@ -1,4 +1,4 @@
-name: Download ReadyForDeployment iFlows from SAP BTP
+name: Download Dynamic ReadyForDeployment iFlows from SAP BTP
 
 on:
   workflow_dispatch:
@@ -8,15 +8,20 @@ on:
         required: false
         default: "feature/btp-iflow-backup"
 
-      deployment_marker:
-        description: "Deployment marker used in SAP saved version"
+      max_major:
+        description: "Maximum major version to scan"
         required: false
-        default: "ReadyForDeployment"
+        default: "5"
 
-  schedule:
-    # Runs twice daily at 09:00 and 18:00 IST
-    # GitHub cron uses UTC
-    - cron: "30 3,12 * * *"
+      max_minor:
+        description: "Maximum minor version to scan"
+        required: false
+        default: "20"
+
+      max_patch:
+        description: "Maximum patch version to scan"
+        required: false
+        default: "50"
 
 permissions:
   contents: write
@@ -24,13 +29,12 @@ permissions:
 env:
   TARGET_BRANCH: feature/btp-iflow-backup
   DEPLOYMENT_MARKER: ReadyForDeployment
-  SAP_DOWNLOAD_VERSION: active
   DOWNLOAD_DIR: btp-iflows
   EXTRACT_ZIP: "true"
 
 jobs:
   download-ready-iflows:
-    name: Download iFlows where saved version is vX.Y.Z.ReadyForDeployment
+    name: Download iFlows saved as vX.Y.Z.ReadyForDeployment
     runs-on: ubuntu-latest
 
     # If your secrets are stored under GitHub Environment secrets,
@@ -48,14 +52,39 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "TARGET_BRANCH=${{ github.event.inputs.target_branch }}" >> "$GITHUB_ENV"
-            echo "DEPLOYMENT_MARKER=${{ github.event.inputs.deployment_marker }}" >> "$GITHUB_ENV"
+          echo "TARGET_BRANCH=${{ github.event.inputs.target_branch }}" >> "$GITHUB_ENV"
+          echo "MAX_MAJOR=${{ github.event.inputs.max_major }}" >> "$GITHUB_ENV"
+          echo "MAX_MINOR=${{ github.event.inputs.max_minor }}" >> "$GITHUB_ENV"
+          echo "MAX_PATCH=${{ github.event.inputs.max_patch }}" >> "$GITHUB_ENV"
+
+          echo "Target branch resolved."
+          echo "Version scan range resolved."
+
+      - name: Validate scan range inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAX_MAJOR_VALUE="${{ github.event.inputs.max_major }}"
+          MAX_MINOR_VALUE="${{ github.event.inputs.max_minor }}"
+          MAX_PATCH_VALUE="${{ github.event.inputs.max_patch }}"
+
+          if ! echo "$MAX_MAJOR_VALUE" | grep -Eq '^[0-9]+$'; then
+            echo "ERROR: max_major must be a number."
+            exit 1
           fi
 
-          echo "Target branch resolved: $TARGET_BRANCH"
-          echo "Deployment marker resolved: $DEPLOYMENT_MARKER"
-          echo "SAP download version: $SAP_DOWNLOAD_VERSION"
+          if ! echo "$MAX_MINOR_VALUE" | grep -Eq '^[0-9]+$'; then
+            echo "ERROR: max_minor must be a number."
+            exit 1
+          fi
+
+          if ! echo "$MAX_PATCH_VALUE" | grep -Eq '^[0-9]+$'; then
+            echo "ERROR: max_patch must be a number."
+            exit 1
+          fi
+
+          echo "Scan range is valid."
 
       - name: Validate required GitHub secrets
         shell: bash
@@ -89,21 +118,15 @@ jobs:
             exit 1
           fi
 
-          case "$SAP_BTP_TOKEN_URL" in
-            https://*) ;;
-            *)
-              echo "ERROR: SAP_BTP_TOKEN_URL must start with https://"
-              exit 1
-              ;;
-          esac
+          if [ "${SAP_BTP_TOKEN_URL#https://}" = "$SAP_BTP_TOKEN_URL" ]; then
+            echo "ERROR: SAP_BTP_TOKEN_URL must start with https://"
+            exit 1
+          fi
 
-          case "$SAP_CPI_API_BASE_URL" in
-            https://*) ;;
-            *)
-              echo "ERROR: SAP_CPI_API_BASE_URL must start with https://"
-              exit 1
-              ;;
-          esac
+          if [ "${SAP_CPI_API_BASE_URL#https://}" = "$SAP_CPI_API_BASE_URL" ]; then
+            echo "ERROR: SAP_CPI_API_BASE_URL must start with https://"
+            exit 1
+          fi
 
           echo "All required secrets are configured."
 
@@ -182,7 +205,7 @@ jobs:
 
           echo "SAP OAuth token generated successfully."
 
-      - name: Fetch and filter iFlows using package fallback
+      - name: Discover iFlow IDs from SAP CPI packages
         shell: bash
         env:
           SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
@@ -190,7 +213,6 @@ jobs:
           set -euo pipefail
 
           SAP_CPI_API_BASE_URL="${SAP_CPI_API_BASE_URL%/}"
-
           mkdir -p "$DOWNLOAD_DIR"
 
           echo "Checking SAP CPI metadata..."
@@ -210,202 +232,125 @@ jobs:
             exit 1
           fi
 
-          echo "Trying direct IntegrationDesigntimeArtifacts collection..."
+          echo "Fetching IntegrationPackages..."
 
-          DIRECT_HTTP_CODE=$(curl -sS \
-            --request GET "$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts?\$format=json" \
+          PACKAGES_HTTP_CODE=$(curl -sS \
+            --request GET "$SAP_CPI_API_BASE_URL/api/v1/IntegrationPackages?\$format=json" \
             --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
             --header "Accept: application/json" \
-            --output artifacts-response.json \
+            --output packages-response.json \
             --write-out "%{http_code}")
 
-          echo "Direct artifact collection HTTP status: $DIRECT_HTTP_CODE"
+          echo "IntegrationPackages HTTP status: $PACKAGES_HTTP_CODE"
 
-          if [ "$DIRECT_HTTP_CODE" = "200" ]; then
-            echo "Direct IntegrationDesigntimeArtifacts collection is supported."
-          else
-            echo "Direct IntegrationDesigntimeArtifacts collection is not supported."
-            echo "Trying package-based fallback..."
-            echo "Direct response:"
-            cat artifacts-response.json || true
-
-            echo "Fetching IntegrationPackages..."
-
-            PACKAGES_HTTP_CODE=$(curl -sS \
-              --request GET "$SAP_CPI_API_BASE_URL/api/v1/IntegrationPackages?\$format=json" \
-              --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
-              --header "Accept: application/json" \
-              --output packages-response.json \
-              --write-out "%{http_code}")
-
-            echo "IntegrationPackages HTTP status: $PACKAGES_HTTP_CODE"
-
-            if [ "$PACKAGES_HTTP_CODE" != "200" ]; then
-              echo "ERROR: Could not fetch IntegrationPackages."
-              cat packages-response.json || true
-              exit 1
-            fi
-
-            echo '{"d":{"results":[]}}' > artifacts-response.json
-
-            echo "Fetching artifacts from each package..."
-
-            jq -r '.d.results[]?.Id' packages-response.json | while read -r PACKAGE_ID; do
-              if [ -z "$PACKAGE_ID" ] || [ "$PACKAGE_ID" = "null" ]; then
-                continue
-              fi
-
-              echo "Fetching artifacts for package: $PACKAGE_ID"
-
-              SAFE_PACKAGE_FILE=$(echo "$PACKAGE_ID" | tr -cd '[:alnum:]_.-')
-              PACKAGE_RESPONSE_FILE="package-artifacts-${SAFE_PACKAGE_FILE}.json"
-
-              ODATA_PACKAGE_ID=$(printf "%s" "$PACKAGE_ID" | sed "s/'/''/g")
-
-              PACKAGE_ARTIFACT_HTTP_CODE=$(curl -sS \
-                --request GET "$SAP_CPI_API_BASE_URL/api/v1/IntegrationPackages('$ODATA_PACKAGE_ID')/IntegrationDesigntimeArtifacts?\$format=json" \
-                --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
-                --header "Accept: application/json" \
-                --output "$PACKAGE_RESPONSE_FILE" \
-                --write-out "%{http_code}")
-
-              echo "Package artifact HTTP status for $PACKAGE_ID: $PACKAGE_ARTIFACT_HTTP_CODE"
-
-              if [ "$PACKAGE_ARTIFACT_HTTP_CODE" = "200" ]; then
-                jq -s '
-                  {
-                    d: {
-                      results: (
-                        (.[0].d.results // []) + (.[1].d.results // [])
-                      )
-                    }
-                  }
-                ' artifacts-response.json "$PACKAGE_RESPONSE_FILE" > combined-artifacts.json
-
-                mv combined-artifacts.json artifacts-response.json
-              else
-                echo "WARNING: Could not fetch artifacts for package: $PACKAGE_ID"
-                cat "$PACKAGE_RESPONSE_FILE" || true
-              fi
-            done
+          if [ "$PACKAGES_HTTP_CODE" != "200" ]; then
+            echo "ERROR: Could not fetch IntegrationPackages."
+            cat packages-response.json || true
+            exit 1
           fi
 
-          echo "Total fetched artifacts:"
-          jq '.d.results | length' artifacts-response.json
+          echo '{"d":{"results":[]}}' > active-artifacts-response.json
 
-          echo "Filtering only by SAP artifact Version field."
-          echo "Accepted saved version format:"
-          echo "vX.Y.Z.$DEPLOYMENT_MARKER"
-          echo "Download version used:"
-          echo "$SAP_DOWNLOAD_VERSION"
+          echo "Fetching artifacts from each package to discover iFlow IDs..."
+
+          jq -r '.d.results[]?.Id' packages-response.json | while read -r PACKAGE_ID; do
+            if [ -z "$PACKAGE_ID" ] || [ "$PACKAGE_ID" = "null" ]; then
+              continue
+            fi
+
+            echo "Fetching artifacts for package: $PACKAGE_ID"
+
+            SAFE_PACKAGE_FILE=$(echo "$PACKAGE_ID" | tr -cd '[:alnum:]_.-')
+            PACKAGE_RESPONSE_FILE="package-artifacts-${SAFE_PACKAGE_FILE}.json"
+
+            ODATA_PACKAGE_ID=$(printf "%s" "$PACKAGE_ID" | sed "s/'/''/g")
+
+            PACKAGE_ARTIFACT_HTTP_CODE=$(curl -sS \
+              --request GET "$SAP_CPI_API_BASE_URL/api/v1/IntegrationPackages('$ODATA_PACKAGE_ID')/IntegrationDesigntimeArtifacts?\$format=json" \
+              --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
+              --header "Accept: application/json" \
+              --output "$PACKAGE_RESPONSE_FILE" \
+              --write-out "%{http_code}")
+
+            echo "Package artifact HTTP status for $PACKAGE_ID: $PACKAGE_ARTIFACT_HTTP_CODE"
+
+            if [ "$PACKAGE_ARTIFACT_HTTP_CODE" = "200" ]; then
+              jq -s '
+                {
+                  d: {
+                    results: (
+                      (.[0].d.results // []) + (.[1].d.results // [])
+                    )
+                  }
+                }
+              ' active-artifacts-response.json "$PACKAGE_RESPONSE_FILE" > combined-artifacts.json
+
+              mv combined-artifacts.json active-artifacts-response.json
+            else
+              echo "WARNING: Could not fetch artifacts for package: $PACKAGE_ID"
+              cat "$PACKAGE_RESPONSE_FILE" || true
+            fi
+          done
+
+          echo "Total discovered artifacts:"
+          jq '.d.results | length' active-artifacts-response.json
 
           python3 << 'PY'
           import json
-          import os
-          import re
 
-          deployment_marker = os.environ.get("DEPLOYMENT_MARKER", "ReadyForDeployment")
-          sap_download_version = os.environ.get("SAP_DOWNLOAD_VERSION", "active").strip() or "active"
-
-          version_pattern = re.compile(
-              rf"^v\d+\.\d+\.\d+\.{re.escape(deployment_marker)}$"
-          )
-
-          with open("artifacts-response.json", "r", encoding="utf-8") as file:
+          with open("active-artifacts-response.json", "r", encoding="utf-8") as file:
               payload = json.load(file)
 
           artifacts = payload.get("d", {}).get("results", [])
 
-          matched = []
-          skipped = []
+          discovered = []
+          seen = set()
 
           for artifact in artifacts:
               artifact_id = artifact.get("Id")
               artifact_name = artifact.get("Name", artifact_id)
-              artifact_version = artifact.get("Version")
               package_id = artifact.get("PackageId")
               artifact_type = artifact.get("ArtifactType") or artifact.get("Type")
+              listed_version = artifact.get("Version")
 
               if not artifact_id:
-                  skipped.append({
-                      "reason": "Missing artifact ID",
-                      "versionFromSAP": artifact_version
-                  })
                   continue
 
-              if not artifact_version:
-                  skipped.append({
-                      "id": artifact_id,
-                      "name": artifact_name,
-                      "packageId": package_id,
-                      "versionFromSAP": artifact_version,
-                      "type": artifact_type,
-                      "reason": "Missing SAP saved version"
-                  })
+              if artifact_id in seen:
                   continue
 
-              if not version_pattern.match(artifact_version):
-                  skipped.append({
-                      "id": artifact_id,
-                      "name": artifact_name,
-                      "packageId": package_id,
-                      "versionFromSAP": artifact_version,
-                      "type": artifact_type,
-                      "reason": "SAP saved version does not match vX.Y.Z.ReadyForDeployment"
-                  })
-                  continue
+              seen.add(artifact_id)
 
-              matched.append({
+              discovered.append({
                   "id": artifact_id,
                   "name": artifact_name,
                   "packageId": package_id,
-                  "versionFromSAP": artifact_version,
-                  "sapDownloadVersion": sap_download_version,
-                  "deploymentTag": artifact_version,
+                  "listedVersion": listed_version,
                   "type": artifact_type
               })
 
-          with open("matched-iflows.json", "w", encoding="utf-8") as file:
-              json.dump(matched, file, indent=2)
+          with open("discovered-iflows.json", "w", encoding="utf-8") as file:
+              json.dump(discovered, file, indent=2)
 
-          with open("skipped-iflows.json", "w", encoding="utf-8") as file:
-              json.dump(skipped, file, indent=2)
+          print(f"Discovered unique artifact IDs: {len(discovered)}")
 
-          print(f"Total artifacts fetched: {len(artifacts)}")
-          print(f"Matched iFlows: {len(matched)}")
-          print(f"Skipped artifacts: {len(skipped)}")
-
-          if matched:
-              print("Matched iFlows:")
-              for item in matched:
-                  print(
-                      f"- ID: {item['id']} | "
-                      f"Name: {item['name']} | "
-                      f"Package: {item.get('packageId')} | "
-                      f"SAP Saved Version: {item['versionFromSAP']} | "
-                      f"Download Version: {item['sapDownloadVersion']}"
-                  )
-          else:
-              print("No iFlows found with SAP saved version vX.Y.Z.ReadyForDeployment.")
+          for item in discovered:
+              print(
+                  f"- ID: {item['id']} | "
+                  f"Name: {item['name']} | "
+                  f"Package: {item.get('packageId')} | "
+                  f"Listed Version: {item.get('listedVersion')}"
+              )
           PY
 
-          MATCH_COUNT=$(jq length matched-iflows.json)
+          DISCOVERED_COUNT=$(jq length discovered-iflows.json)
 
-          if [ "$MATCH_COUNT" -eq 0 ]; then
-            echo "No matching iFlows found with SAP saved version vX.Y.Z.$DEPLOYMENT_MARKER."
-            echo "Nothing to download."
+          if [ "$DISCOVERED_COUNT" -eq 0 ]; then
+            echo "No artifact IDs discovered. Nothing to download."
             exit 0
           fi
 
-      - name: Print matched iFlows before download
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Matched iFlows selected for download:"
-          jq -r '.[] | "ID: \(.id) | Name: \(.name) | Package: \(.packageId) | SAP Saved Version: \(.versionFromSAP) | Download Version: \(.sapDownloadVersion)"' matched-iflows.json
-
-      - name: Download matched iFlows from SAP BTP
+      - name: Try downloading all dynamic ReadyForDeployment versions
         shell: bash
         env:
           SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
@@ -414,93 +359,131 @@ jobs:
 
           SAP_CPI_API_BASE_URL="${SAP_CPI_API_BASE_URL%/}"
 
-          jq -c '.[]' matched-iflows.json | while read -r artifact; do
+          echo "Scanning versions using pattern:"
+          echo "vX.Y.Z.$DEPLOYMENT_MARKER"
+          echo "Major range: 0 to $MAX_MAJOR"
+          echo "Minor range: 0 to $MAX_MINOR"
+          echo "Patch range: 0 to $MAX_PATCH"
+
+          echo "[]" > matched-iflows.json
+          echo "[]" > scan-summary.json
+
+          jq -c '.[]' discovered-iflows.json | while read -r artifact; do
             IFLOW_ID=$(echo "$artifact" | jq -r '.id')
             IFLOW_NAME=$(echo "$artifact" | jq -r '.name')
             PACKAGE_ID=$(echo "$artifact" | jq -r '.packageId // "NA"')
-            SAP_SAVED_VERSION=$(echo "$artifact" | jq -r '.versionFromSAP')
-            SAP_DOWNLOAD_VERSION_ITEM=$(echo "$artifact" | jq -r '.sapDownloadVersion')
-
-            SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
-            SAFE_SAVED_VERSION=$(echo "$SAP_SAVED_VERSION" | tr -cd '[:alnum:]_.-')
-
-            TARGET_PATH="$DOWNLOAD_DIR/$SAFE_ID/$SAFE_SAVED_VERSION"
-            ZIP_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_SAVED_VERSION}.zip"
-            ERROR_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_SAVED_VERSION}_sap_error.txt"
-
-            mkdir -p "$TARGET_PATH"
-
-            ODATA_ID=$(printf "%s" "$IFLOW_ID" | sed "s/'/''/g")
-            ODATA_VERSION=$(printf "%s" "$SAP_DOWNLOAD_VERSION_ITEM" | sed "s/'/''/g")
-
-            DOWNLOAD_URL="$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts(Id='$ODATA_ID',Version='$ODATA_VERSION')/\$value"
 
             echo "------------------------------------------------------------"
-            echo "Downloading iFlow"
-            echo "ID                   : $IFLOW_ID"
-            echo "Name                 : $IFLOW_NAME"
-            echo "Package              : $PACKAGE_ID"
-            echo "SAP Saved Version    : $SAP_SAVED_VERSION"
-            echo "Download Version     : $SAP_DOWNLOAD_VERSION_ITEM"
-            echo "URL Pattern          : /api/v1/IntegrationDesigntimeArtifacts(Id='<ID>',Version='active')/\$value"
+            echo "Scanning versions for iFlow"
+            echo "ID      : $IFLOW_ID"
+            echo "Name    : $IFLOW_NAME"
+            echo "Package : $PACKAGE_ID"
             echo "------------------------------------------------------------"
 
-            HTTP_CODE=$(curl -sS \
-              --request GET "$DOWNLOAD_URL" \
-              --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
-              --header "Accept: application/zip" \
-              --output "$ZIP_FILE" \
-              --write-out "%{http_code}")
+            FOUND_COUNT_FOR_IFLOW=0
 
-            echo "Download HTTP status: $HTTP_CODE"
+            for MAJOR in $(seq 0 "$MAX_MAJOR"); do
+              for MINOR in $(seq 0 "$MAX_MINOR"); do
+                for PATCH in $(seq 0 "$MAX_PATCH"); do
 
-            if [ "$HTTP_CODE" != "200" ]; then
-              echo "ERROR: Download failed for iFlow: $IFLOW_ID"
+                  CANDIDATE_VERSION="v${MAJOR}.${MINOR}.${PATCH}.${DEPLOYMENT_MARKER}"
 
-              curl -sS \
-                --request GET "$DOWNLOAD_URL" \
-                --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
-                --header "Accept: application/json" \
-                --output "$ERROR_FILE" || true
+                  SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
+                  SAFE_VERSION=$(echo "$CANDIDATE_VERSION" | tr -cd '[:alnum:]_.-')
 
-              echo "SAP error response:"
-              cat "$ERROR_FILE" || true
+                  TARGET_PATH="$DOWNLOAD_DIR/$SAFE_ID/$SAFE_VERSION"
+                  ZIP_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_VERSION}.zip"
 
-              rm -f "$ZIP_FILE"
+                  mkdir -p "$TARGET_PATH"
 
-              echo ""
-              echo "Troubleshooting hints:"
-              echo "1. The iFlow matched saved version: $SAP_SAVED_VERSION"
-              echo "2. Download attempted with Version='active'."
-              echo "3. Confirm the iFlow has an active version available."
-              echo "4. Confirm OAuth client has required Cloud Integration API roles."
-              echo "5. Confirm SAP_CPI_API_BASE_URL is correct CPI API tenant URL."
-              exit 1
+                  ODATA_ID=$(printf "%s" "$IFLOW_ID" | sed "s/'/''/g")
+                  ODATA_VERSION=$(printf "%s" "$CANDIDATE_VERSION" | sed "s/'/''/g")
+
+                  DOWNLOAD_URL="$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts(Id='$ODATA_ID',Version='$ODATA_VERSION')/\$value"
+
+                  HTTP_CODE=$(curl -sS \
+                    --request GET "$DOWNLOAD_URL" \
+                    --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
+                    --header "Accept: application/zip" \
+                    --output "$ZIP_FILE" \
+                    --write-out "%{http_code}")
+
+                  if [ "$HTTP_CODE" = "200" ] && [ -s "$ZIP_FILE" ]; then
+                    echo "Downloaded: $IFLOW_ID | Version: $CANDIDATE_VERSION"
+
+                    FOUND_COUNT_FOR_IFLOW=$((FOUND_COUNT_FOR_IFLOW + 1))
+
+                    if [ "$EXTRACT_ZIP" = "true" ]; then
+                      EXTRACT_PATH="$TARGET_PATH/extracted"
+                      rm -rf "$EXTRACT_PATH"
+                      mkdir -p "$EXTRACT_PATH"
+
+                      if unzip -tq "$ZIP_FILE" >/dev/null 2>&1; then
+                        unzip -q "$ZIP_FILE" -d "$EXTRACT_PATH"
+                        echo "ZIP extracted to: $EXTRACT_PATH"
+                      else
+                        echo "WARNING: Downloaded file is not a valid ZIP. Keeping ZIP only."
+                      fi
+                    fi
+
+                    TMP_FILE=$(mktemp)
+
+                    jq \
+                      --arg id "$IFLOW_ID" \
+                      --arg name "$IFLOW_NAME" \
+                      --arg packageId "$PACKAGE_ID" \
+                      --arg version "$CANDIDATE_VERSION" \
+                      --arg zipFile "$ZIP_FILE" \
+                      '. + [{
+                        id: $id,
+                        name: $name,
+                        packageId: $packageId,
+                        downloadedVersion: $version,
+                        zipFile: $zipFile
+                      }]' matched-iflows.json > "$TMP_FILE"
+
+                    mv "$TMP_FILE" matched-iflows.json
+                  else
+                    rm -f "$ZIP_FILE"
+                    rmdir "$TARGET_PATH" 2>/dev/null || true
+                  fi
+
+                done
+              done
+            done
+
+            TMP_SUMMARY_FILE=$(mktemp)
+
+            jq \
+              --arg id "$IFLOW_ID" \
+              --arg name "$IFLOW_NAME" \
+              --arg packageId "$PACKAGE_ID" \
+              --arg foundCount "$FOUND_COUNT_FOR_IFLOW" \
+              '. + [{
+                id: $id,
+                name: $name,
+                packageId: $packageId,
+                downloadedVersionCount: ($foundCount | tonumber)
+              }]' scan-summary.json > "$TMP_SUMMARY_FILE"
+
+            mv "$TMP_SUMMARY_FILE" scan-summary.json
+
+            if [ "$FOUND_COUNT_FOR_IFLOW" -eq 0 ]; then
+              echo "No ReadyForDeployment version found for iFlow: $IFLOW_ID"
+            else
+              echo "Downloaded $FOUND_COUNT_FOR_IFLOW version(s) for iFlow: $IFLOW_ID"
             fi
-
-            if [ ! -s "$ZIP_FILE" ]; then
-              echo "ERROR: Downloaded ZIP is empty for iFlow: $IFLOW_ID"
-              exit 1
-            fi
-
-            echo "Downloaded file details:"
-            file "$ZIP_FILE" || true
-
-            if [ "$EXTRACT_ZIP" = "true" ]; then
-              EXTRACT_PATH="$TARGET_PATH/extracted"
-              rm -rf "$EXTRACT_PATH"
-              mkdir -p "$EXTRACT_PATH"
-
-              if unzip -tq "$ZIP_FILE" >/dev/null 2>&1; then
-                unzip -q "$ZIP_FILE" -d "$EXTRACT_PATH"
-                echo "ZIP extracted to: $EXTRACT_PATH"
-              else
-                echo "WARNING: Downloaded file is not a valid ZIP. Keeping ZIP only."
-              fi
-            fi
-
-            echo "Downloaded successfully: $ZIP_FILE"
           done
+
+          MATCH_COUNT=$(jq length matched-iflows.json)
+
+          echo "Total downloaded iFlow versions: $MATCH_COUNT"
+
+          if [ "$MATCH_COUNT" -eq 0 ]; then
+            echo "No iFlow versions found with pattern vX.Y.Z.$DEPLOYMENT_MARKER in configured range."
+            echo "Increase max_major, max_minor, or max_patch and rerun."
+            exit 0
+          fi
 
       - name: Create download manifest
         shell: bash
@@ -512,18 +495,21 @@ jobs:
 
           jq \
             --arg downloadedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-            --arg marker "$DEPLOYMENT_MARKER" \
             --arg targetBranch "$TARGET_BRANCH" \
             --arg acceptedVersionFormat "$ACCEPTED_VERSION_FORMAT" \
-            --arg sapDownloadVersion "$SAP_DOWNLOAD_VERSION" \
+            --arg maxMajor "$MAX_MAJOR" \
+            --arg maxMinor "$MAX_MINOR" \
+            --arg maxPatch "$MAX_PATCH" \
             '{
               downloadedAtUtc: $downloadedAt,
               targetBranch: $targetBranch,
-              deploymentMarker: $marker,
-              acceptedDeploymentVersionFormat: $acceptedVersionFormat,
-              sapDownloadVersionUsedForDownload: $sapDownloadVersion,
-              versionMatchRule: "Only SAP artifact Version field is checked. Name, Description, Tags, Labels, and Keywords are ignored.",
-              downloadRule: "Matched iFlows are downloaded using SAP artifact Version active.",
+              acceptedVersionFormat: $acceptedVersionFormat,
+              scanRange: {
+                maxMajor: ($maxMajor | tonumber),
+                maxMinor: ($maxMinor | tonumber),
+                maxPatch: ($maxPatch | tonumber)
+              },
+              selectionRule: "Pipeline dynamically tries versions matching vX.Y.Z.ReadyForDeployment and downloads only successful SAP CPI responses.",
               artifacts: .
             }' matched-iflows.json > "$MANIFEST_FILE"
 
@@ -542,7 +528,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Download SAP BTP iFlows saved as vX.Y.Z.$DEPLOYMENT_MARKER"
+          git commit -m "Download SAP BTP iFlows saved as dynamic ReadyForDeployment versions"
           git push origin "$TARGET_BRANCH"
 
           echo "Downloaded iFlows pushed to branch: $TARGET_BRANCH"
