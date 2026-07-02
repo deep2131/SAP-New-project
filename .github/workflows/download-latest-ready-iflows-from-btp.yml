@@ -8,24 +8,11 @@ on:
         required: false
         default: "feature/btp-iflow-backup"
 
-      max_major:
-        description: "Maximum major version to scan"
-        required: false
-        default: "5"
-
-      max_minor:
-        description: "Maximum minor version to scan"
-        required: false
-        default: "20"
-
-      max_patch:
-        description: "Maximum patch version to scan"
-        required: false
-        default: "50"
-
   schedule:
-    # Runs twice daily at 09:00 and 18:00 IST
-    # GitHub cron uses UTC
+    # Runs twice daily at 09:00 IST and 18:00 IST
+    # GitHub cron runs in UTC
+    # 03:30 UTC = 09:00 IST
+    # 12:30 UTC = 18:00 IST
     - cron: "30 3,12 * * *"
 
 permissions:
@@ -42,8 +29,8 @@ jobs:
     name: Download latest X.Y.Z.ReadyForDeployment iFlows
     runs-on: ubuntu-latest
 
-    # If your secrets are stored under GitHub Environment secrets,
-    # uncomment below and replace dev with your actual environment name.
+    # If secrets are stored under GitHub Environment secrets,
+    # replace dev with your environment name.
     environment: dev
 
     steps:
@@ -54,57 +41,19 @@ jobs:
 
       - name: Resolve runtime inputs
         shell: bash
-        env:
-          REPO_MAX_MAJOR: ${{ vars.MAX_MAJOR }}
-          REPO_MAX_MINOR: ${{ vars.MAX_MINOR }}
-          REPO_MAX_PATCH: ${{ vars.MAX_PATCH }}
         run: |
           set -euo pipefail
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TARGET_BRANCH_VALUE="${{ github.event.inputs.target_branch }}"
-            MAX_MAJOR_VALUE="${{ github.event.inputs.max_major }}"
-            MAX_MINOR_VALUE="${{ github.event.inputs.max_minor }}"
-            MAX_PATCH_VALUE="${{ github.event.inputs.max_patch }}"
           else
             TARGET_BRANCH_VALUE="$TARGET_BRANCH"
-            MAX_MAJOR_VALUE="${REPO_MAX_MAJOR:-5}"
-            MAX_MINOR_VALUE="${REPO_MAX_MINOR:-20}"
-            MAX_PATCH_VALUE="${REPO_MAX_PATCH:-50}"
           fi
 
           echo "TARGET_BRANCH=$TARGET_BRANCH_VALUE" >> "$GITHUB_ENV"
-          echo "MAX_MAJOR=$MAX_MAJOR_VALUE" >> "$GITHUB_ENV"
-          echo "MAX_MINOR=$MAX_MINOR_VALUE" >> "$GITHUB_ENV"
-          echo "MAX_PATCH=$MAX_PATCH_VALUE" >> "$GITHUB_ENV"
 
           echo "Target branch resolved: $TARGET_BRANCH_VALUE"
-          echo "Scan range resolved:"
-          echo "Major: 0 to $MAX_MAJOR_VALUE"
-          echo "Minor: 0 to $MAX_MINOR_VALUE"
-          echo "Patch: 0 to $MAX_PATCH_VALUE"
-
-      - name: Validate scan range inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if ! echo "$MAX_MAJOR" | grep -Eq '^[0-9]+$'; then
-            echo "ERROR: MAX_MAJOR must be numeric."
-            exit 1
-          fi
-
-          if ! echo "$MAX_MINOR" | grep -Eq '^[0-9]+$'; then
-            echo "ERROR: MAX_MINOR must be numeric."
-            exit 1
-          fi
-
-          if ! echo "$MAX_PATCH" | grep -Eq '^[0-9]+$'; then
-            echo "ERROR: MAX_PATCH must be numeric."
-            exit 1
-          fi
-
-          echo "Scan range inputs are valid."
+          echo "Deployment marker: $DEPLOYMENT_MARKER"
 
       - name: Validate required GitHub secrets
         shell: bash
@@ -225,7 +174,7 @@ jobs:
 
           echo "SAP OAuth token generated successfully."
 
-      - name: Discover iFlow IDs from SAP CPI packages
+      - name: Discover iFlow IDs and version history
         shell: bash
         env:
           SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
@@ -331,7 +280,6 @@ jobs:
               artifact_name = artifact.get("Name", artifact_id)
               package_id = artifact.get("PackageId")
               listed_version = artifact.get("Version")
-              artifact_type = artifact.get("ArtifactType") or artifact.get("Type")
 
               if not artifact_id:
                   continue
@@ -345,14 +293,13 @@ jobs:
                   "id": artifact_id,
                   "name": artifact_name,
                   "packageId": package_id,
-                  "listedVersion": listed_version,
-                  "type": artifact_type
+                  "listedVersion": listed_version
               })
 
           with open("discovered-iflows.json", "w", encoding="utf-8") as file:
               json.dump(discovered, file, indent=2)
 
-          print(f"Discovered unique artifact IDs: {len(discovered)}")
+          print(f"Discovered unique iFlow IDs: {len(discovered)}")
 
           for item in discovered:
               print(
@@ -366,10 +313,11 @@ jobs:
           DISCOVERED_COUNT=$(jq length discovered-iflows.json)
 
           if [ "$DISCOVERED_COUNT" -eq 0 ]; then
-            echo "No artifact IDs discovered. Nothing to download."
+            echo "No iFlow IDs discovered. Nothing to download."
             exit 0
           fi
-      - name: Download latest X.Y.Z.ReadyForDeployment version per iFlow
+
+      - name: Fetch version history and pick latest X.Y.Z.ReadyForDeployment
         shell: bash
         env:
           SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
@@ -378,175 +326,236 @@ jobs:
 
           SAP_CPI_API_BASE_URL="${SAP_CPI_API_BASE_URL%/}"
 
-          echo "Downloading latest saved version per iFlow using pattern:"
-          echo "X.Y.Z.$DEPLOYMENT_MARKER"
-          echo "Scanning from highest to lowest:"
-          echo "Major: $MAX_MAJOR to 0"
-          echo "Minor: $MAX_MINOR to 0"
-          echo "Patch: $MAX_PATCH to 0"
-
-          echo "[]" > matched-iflows.json
-          echo "[]" > scan-summary.json
+          echo "[]" > selected-iflows.json
 
           jq -c '.[]' discovered-iflows.json | while read -r artifact; do
             IFLOW_ID=$(echo "$artifact" | jq -r '.id')
             IFLOW_NAME=$(echo "$artifact" | jq -r '.name')
             PACKAGE_ID=$(echo "$artifact" | jq -r '.packageId // "NA"')
 
+            ODATA_ID=$(printf "%s" "$IFLOW_ID" | sed "s/'/''/g")
+
+            HISTORY_URL="$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifactsHistory?\$filter=Id%20eq%20'$ODATA_ID'&\$format=json"
+            HISTORY_FILE="history-$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-').json"
+
             echo "------------------------------------------------------------"
-            echo "Scanning latest ReadyForDeployment version for iFlow"
+            echo "Fetching version history for iFlow: $IFLOW_ID"
+            echo "------------------------------------------------------------"
+
+            HISTORY_HTTP_CODE=$(curl -sS \
+              --connect-timeout 10 \
+              --max-time 45 \
+              --request GET "$HISTORY_URL" \
+              --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
+              --header "Accept: application/json" \
+              --output "$HISTORY_FILE" \
+              --write-out "%{http_code}")
+
+            echo "History HTTP status: $HISTORY_HTTP_CODE"
+
+            if [ "$HISTORY_HTTP_CODE" != "200" ]; then
+              echo "WARNING: History API not accessible for $IFLOW_ID. Skipping."
+              cat "$HISTORY_FILE" || true
+              continue
+            fi
+
+            LATEST_VERSION=$(python3 - << PY
+          import json
+          import re
+
+          try:
+              with open("$HISTORY_FILE", "r", encoding="utf-8") as file:
+                  payload = json.load(file)
+          except Exception:
+              print("")
+              raise SystemExit(0)
+
+          versions = []
+          for entry in payload.get("d", {}).get("results", []):
+              version = entry.get("Version")
+              if not version:
+                  continue
+
+              match = re.match(r"^(\d+)\.(\d+)\.(\d+)\.ReadyForDeployment$", version)
+              if match:
+                  major = int(match.group(1))
+                  minor = int(match.group(2))
+                  patch = int(match.group(3))
+                  versions.append(((major, minor, patch), version))
+
+          if not versions:
+              print("")
+          else:
+              versions.sort(reverse=True)
+              print(versions[0][1])
+          PY
+          )
+
+            if [ -z "$LATEST_VERSION" ]; then
+              echo "No X.Y.Z.ReadyForDeployment version found for iFlow: $IFLOW_ID"
+              continue
+            fi
+
+            echo "Latest ReadyForDeployment version for $IFLOW_ID is: $LATEST_VERSION"
+
+            TMP_FILE=$(mktemp)
+
+            jq \
+              --arg id "$IFLOW_ID" \
+              --arg name "$IFLOW_NAME" \
+              --arg packageId "$PACKAGE_ID" \
+              --arg version "$LATEST_VERSION" \
+              '. + [{
+                id: $id,
+                name: $name,
+                packageId: $packageId,
+                latestReadyVersion: $version
+              }]' selected-iflows.json > "$TMP_FILE"
+
+            mv "$TMP_FILE" selected-iflows.json
+          done
+
+          SELECTED_COUNT=$(jq length selected-iflows.json)
+
+          echo "iFlows with latest ReadyForDeployment version found: $SELECTED_COUNT"
+
+          if [ "$SELECTED_COUNT" -eq 0 ]; then
+            echo "No iFlows have any X.Y.Z.ReadyForDeployment saved version."
+            exit 0
+          fi
+
+      - name: Download selected iFlows with their latest ReadyForDeployment version
+        shell: bash
+        env:
+          SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
+        run: |
+          set -euo pipefail
+
+          SAP_CPI_API_BASE_URL="${SAP_CPI_API_BASE_URL%/}"
+
+          echo "[]" > matched-iflows.json
+          echo "[]" > failed-iflows.json
+
+          jq -c '.[]' selected-iflows.json | while read -r item; do
+            IFLOW_ID=$(echo "$item" | jq -r '.id')
+            IFLOW_NAME=$(echo "$item" | jq -r '.name')
+            PACKAGE_ID=$(echo "$item" | jq -r '.packageId // "NA"')
+            IFLOW_VERSION=$(echo "$item" | jq -r '.latestReadyVersion')
+
+            SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
+            SAFE_VERSION=$(echo "$IFLOW_VERSION" | tr -cd '[:alnum:]_.-')
+
+            TARGET_PATH="$DOWNLOAD_DIR/$SAFE_ID/$SAFE_VERSION"
+            ZIP_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_VERSION}.zip"
+            ERROR_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_VERSION}_sap_error.txt"
+
+            mkdir -p "$TARGET_PATH"
+
+            ODATA_ID=$(printf "%s" "$IFLOW_ID" | sed "s/'/''/g")
+            ODATA_VERSION=$(printf "%s" "$IFLOW_VERSION" | sed "s/'/''/g")
+
+            DOWNLOAD_URL="$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts(Id='$ODATA_ID',Version='$ODATA_VERSION')/\$value"
+
+            echo "------------------------------------------------------------"
+            echo "Downloading iFlow"
             echo "ID      : $IFLOW_ID"
             echo "Name    : $IFLOW_NAME"
             echo "Package : $PACKAGE_ID"
+            echo "Version : $IFLOW_VERSION"
+            echo "Folder  : $TARGET_PATH"
             echo "------------------------------------------------------------"
 
-            FOUND_VERSION=""
+            HTTP_CODE=$(curl -sS \
+              --connect-timeout 10 \
+              --max-time 90 \
+              --request GET "$DOWNLOAD_URL" \
+              --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
+              --header "Accept: application/zip" \
+              --output "$ZIP_FILE" \
+              --write-out "%{http_code}")
 
-            for MAJOR in $(seq "$MAX_MAJOR" -1 0); do
-              if [ -n "$FOUND_VERSION" ]; then
-                break
+            echo "Download HTTP status: $HTTP_CODE"
+
+            if [ "$HTTP_CODE" = "200" ] && [ -s "$ZIP_FILE" ]; then
+              echo "Downloaded successfully: $IFLOW_ID | $IFLOW_VERSION"
+
+              if [ "$EXTRACT_ZIP" = "true" ]; then
+                EXTRACT_PATH="$TARGET_PATH/extracted"
+                rm -rf "$EXTRACT_PATH"
+                mkdir -p "$EXTRACT_PATH"
+
+                if unzip -tq "$ZIP_FILE" >/dev/null 2>&1; then
+                  unzip -q "$ZIP_FILE" -d "$EXTRACT_PATH"
+                  echo "ZIP extracted to: $EXTRACT_PATH"
+                else
+                  echo "WARNING: Downloaded file is not a valid ZIP. Keeping ZIP only."
+                fi
               fi
 
-              for MINOR in $(seq "$MAX_MINOR" -1 0); do
-                if [ -n "$FOUND_VERSION" ]; then
-                  break
-                fi
+              TMP_FILE=$(mktemp)
 
-                for PATCH in $(seq "$MAX_PATCH" -1 0); do
-
-                  # IMPORTANT:
-                  # Version format is 1.0.1.ReadyForDeployment
-                  # Not v1.0.1.ReadyForDeployment
-                  CANDIDATE_VERSION="${MAJOR}.${MINOR}.${PATCH}.${DEPLOYMENT_MARKER}"
-
-                  SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
-                  SAFE_VERSION=$(echo "$CANDIDATE_VERSION" | tr -cd '[:alnum:]_.-')
-
-                  TARGET_PATH="$DOWNLOAD_DIR/$SAFE_ID/$SAFE_VERSION"
-                  ZIP_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_VERSION}.zip"
-                  ERROR_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_VERSION}_sap_error.txt"
-
-                  mkdir -p "$TARGET_PATH"
-
-                  ODATA_ID=$(printf "%s" "$IFLOW_ID" | sed "s/'/''/g")
-                  ODATA_VERSION=$(printf "%s" "$CANDIDATE_VERSION" | sed "s/'/''/g")
-
-                  DOWNLOAD_URL="$SAP_CPI_API_BASE_URL/api/v1/IntegrationDesigntimeArtifacts(Id='$ODATA_ID',Version='$ODATA_VERSION')/\$value"
-
-                  HTTP_CODE=$(curl -sS \
-                    --connect-timeout 10 \
-                    --max-time 45 \
-                    --request GET "$DOWNLOAD_URL" \
-                    --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
-                    --header "Accept: application/zip" \
-                    --output "$ZIP_FILE" \
-                    --write-out "%{http_code}")
-
-                  if [ "$HTTP_CODE" = "200" ] && [ -s "$ZIP_FILE" ]; then
-                    echo "Latest matching version found and downloaded:"
-                    echo "iFlow   : $IFLOW_ID"
-                    echo "Version : $CANDIDATE_VERSION"
-
-                    FOUND_VERSION="$CANDIDATE_VERSION"
-
-                    if [ "$EXTRACT_ZIP" = "true" ]; then
-                      EXTRACT_PATH="$TARGET_PATH/extracted"
-                      rm -rf "$EXTRACT_PATH"
-                      mkdir -p "$EXTRACT_PATH"
-
-                      if unzip -tq "$ZIP_FILE" >/dev/null 2>&1; then
-                        unzip -q "$ZIP_FILE" -d "$EXTRACT_PATH"
-                        echo "ZIP extracted to: $EXTRACT_PATH"
-                      else
-                        echo "WARNING: Downloaded file is not a valid ZIP. Keeping ZIP only."
-                      fi
-                    fi
-
-                    TMP_FILE=$(mktemp)
-
-                    jq \
-                      --arg id "$IFLOW_ID" \
-                      --arg name "$IFLOW_NAME" \
-                      --arg packageId "$PACKAGE_ID" \
-                      --arg version "$CANDIDATE_VERSION" \
-                      --arg zipFile "$ZIP_FILE" \
-                      '. + [{
-                        id: $id,
-                        name: $name,
-                        packageId: $packageId,
-                        downloadedVersion: $version,
-                        zipFile: $zipFile
-                      }]' matched-iflows.json > "$TMP_FILE"
-
-                    mv "$TMP_FILE" matched-iflows.json
-
-                    break
-                  else
-                    rm -f "$ZIP_FILE"
-
-                    if [ "$MAJOR" = "$MAX_MAJOR" ] && [ "$MINOR" = "$MAX_MINOR" ] && [ "$PATCH" = "$MAX_PATCH" ]; then
-                      echo "Highest attempted version did not download:"
-                      echo "$CANDIDATE_VERSION"
-                      echo "HTTP status: $HTTP_CODE"
-
-                      curl -sS \
-                        --connect-timeout 10 \
-                        --max-time 30 \
-                        --request GET "$DOWNLOAD_URL" \
-                        --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
-                        --header "Accept: application/json" \
-                        --output "$ERROR_FILE" || true
-
-                      echo "SAP response for highest attempted version:"
-                      cat "$ERROR_FILE" || true
-                    fi
-
-                    rmdir "$TARGET_PATH" 2>/dev/null || true
-                  fi
-                done
-              done
-            done
-
-            TMP_SUMMARY_FILE=$(mktemp)
-
-            if [ -n "$FOUND_VERSION" ]; then
               jq \
                 --arg id "$IFLOW_ID" \
                 --arg name "$IFLOW_NAME" \
                 --arg packageId "$PACKAGE_ID" \
-                --arg foundVersion "$FOUND_VERSION" \
+                --arg version "$IFLOW_VERSION" \
+                --arg zipFile "$ZIP_FILE" \
+                --arg folder "$TARGET_PATH" \
                 '. + [{
                   id: $id,
                   name: $name,
                   packageId: $packageId,
-                  status: "Downloaded latest ReadyForDeployment version",
-                  foundVersion: $foundVersion
-                }]' scan-summary.json > "$TMP_SUMMARY_FILE"
+                  downloadedVersion: $version,
+                  zipFile: $zipFile,
+                  folder: $folder,
+                  status: "Downloaded"
+                }]' matched-iflows.json > "$TMP_FILE"
+
+              mv "$TMP_FILE" matched-iflows.json
             else
+              echo "ERROR: Failed to download $IFLOW_ID version $IFLOW_VERSION"
+
+              curl -sS \
+                --connect-timeout 10 \
+                --max-time 30 \
+                --request GET "$DOWNLOAD_URL" \
+                --header "Authorization: Bearer $SAP_ACCESS_TOKEN" \
+                --header "Accept: application/json" \
+                --output "$ERROR_FILE" || true
+
+              echo "SAP error response:"
+              cat "$ERROR_FILE" || true
+
+              rm -f "$ZIP_FILE"
+
+              TMP_FILE=$(mktemp)
+
               jq \
                 --arg id "$IFLOW_ID" \
-                --arg name "$IFLOW_NAME" \
-                --arg packageId "$PACKAGE_ID" \
+                --arg version "$IFLOW_VERSION" \
+                --arg httpCode "$HTTP_CODE" \
+                --arg errorFile "$ERROR_FILE" \
                 '. + [{
                   id: $id,
-                  name: $name,
-                  packageId: $packageId,
-                  status: "No matching X.Y.Z.ReadyForDeployment version found"
-                }]' scan-summary.json > "$TMP_SUMMARY_FILE"
-            fi
+                  attemptedVersion: $version,
+                  httpCode: $httpCode,
+                  errorFile: $errorFile,
+                  status: "Failed"
+                }]' failed-iflows.json > "$TMP_FILE"
 
-            mv "$TMP_SUMMARY_FILE" scan-summary.json
+              mv "$TMP_FILE" failed-iflows.json
+            fi
           done
 
-          MATCH_COUNT=$(jq length matched-iflows.json)
+          SUCCESS_COUNT=$(jq length matched-iflows.json)
+          FAILED_COUNT=$(jq length failed-iflows.json)
 
-          echo "Total downloaded latest iFlow versions: $MATCH_COUNT"
+          echo "Downloaded iFlows count: $SUCCESS_COUNT"
+          echo "Failed iFlows count: $FAILED_COUNT"
 
-          if [ "$MATCH_COUNT" -eq 0 ]; then
-            echo "No iFlows were found with saved version pattern X.Y.Z.$DEPLOYMENT_MARKER."
-            echo "Please confirm SAP CPI saved version has exact format, for example:"
-            echo "1.0.1.ReadyForDeployment"
-            exit 0
+          if [ "$SUCCESS_COUNT" -eq 0 ]; then
+            echo "ERROR: No iFlows were downloaded."
+            exit 1
           fi
 
       - name: Create download manifest
@@ -561,20 +570,12 @@ jobs:
             --arg downloadedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
             --arg targetBranch "$TARGET_BRANCH" \
             --arg acceptedVersionFormat "$ACCEPTED_VERSION_FORMAT" \
-            --arg maxMajor "$MAX_MAJOR" \
-            --arg maxMinor "$MAX_MINOR" \
-            --arg maxPatch "$MAX_PATCH" \
             '{
               downloadedAtUtc: $downloadedAt,
               targetBranch: $targetBranch,
               acceptedVersionFormat: $acceptedVersionFormat,
-              scanRange: {
-                maxMajor: ($maxMajor | tonumber),
-                maxMinor: ($maxMinor | tonumber),
-                maxPatch: ($maxPatch | tonumber)
-              },
-              selectionRule: "For each discovered iFlow, pipeline scans saved versions from highest to lowest and downloads the first matching X.Y.Z.ReadyForDeployment version.",
-              downloadRule: "Download URL uses IntegrationDesigntimeArtifacts(Id=<id>,Version=<X.Y.Z.ReadyForDeployment>)/$value.",
+              selectionRule: "Pipeline reads version history from SAP CPI and picks the latest X.Y.Z.ReadyForDeployment version per iFlow.",
+              downloadRule: "Download URL uses IntegrationDesigntimeArtifacts(Id=<id>,Version=<latest X.Y.Z.ReadyForDeployment>)/$value.",
               artifacts: .
             }' matched-iflows.json > "$MANIFEST_FILE"
 
