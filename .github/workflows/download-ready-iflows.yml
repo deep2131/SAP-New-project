@@ -27,7 +27,7 @@ jobs:
     name: Download X.Y.Z.ReadyForDeployment iFlows from SAP CPI
     runs-on: ubuntu-latest
 
-    # Keep this only if secrets are stored under GitHub Environment secrets.
+    # Keep this only if secrets are stored under GitHub Environment secrets..
     environment: dev
 
     steps:
