@@ -1,0 +1,453 @@
+name: Deploy Latest Downloaded iFlow to QA via CTMS
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: "Feature branch that contains downloaded iFlows"
+        required: false
+        default: "feature/btp-iflow-backup"
+
+      tr_description:
+        description: "Transport request description"
+        required: false
+        default: "Automated deployment from GitHub Actions"
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_BRANCH: feature/btp-iflow-backup
+  DOWNLOAD_DIR: btp-iflows
+  MANIFEST_FILE: btp-iflows/download-manifest.json
+
+jobs:
+  deploy-latest-iflow-to-qa:
+    name: Deploy latest downloaded iFlow to QA
+    runs-on: ubuntu-latest
+
+    # Keep this only if CTMS secrets are stored under GitHub Environment 'qa'
+    environment: qa
+
+    steps:
+      - name: Resolve runtime inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SOURCE_BRANCH_VALUE="${{ github.event.inputs.source_branch }}"
+            TR_DESCRIPTION_VALUE="${{ github.event.inputs.tr_description }}"
+          else
+            SOURCE_BRANCH_VALUE="$SOURCE_BRANCH"
+            TR_DESCRIPTION_VALUE="Automated deployment from GitHub Actions"
+          fi
+
+          echo "SOURCE_BRANCH=$SOURCE_BRANCH_VALUE" >> "$GITHUB_ENV"
+          echo "TR_DESCRIPTION=$TR_DESCRIPTION_VALUE" >> "$GITHUB_ENV"
+
+          echo "Source branch resolved : $SOURCE_BRANCH_VALUE"
+          echo "TR description resolved: $TR_DESCRIPTION_VALUE"
+
+      - name: Checkout source branch with downloaded iFlows
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_BRANCH }}
+          fetch-depth: 0
+
+      - name: Verify manifest file exists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "$MANIFEST_FILE" ]; then
+            echo "ERROR: Manifest file not found at $MANIFEST_FILE"
+            find . -name "download-manifest.json" -print || true
+            exit 1
+          fi
+
+          echo "Manifest file found: $MANIFEST_FILE"
+          jq empty "$MANIFEST_FILE"
+
+          echo "Manifest content:"
+          cat "$MANIFEST_FILE"
+
+      - name: Identify only the latest downloaded iFlow
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Finding the latest committed iFlow ZIP under $DOWNLOAD_DIR ..."
+
+          # Use Git history to find the most recently committed ZIP file
+          LATEST_ZIP=$(git log --name-only --pretty=format: --diff-filter=AM -- "$DOWNLOAD_DIR/**/*.zip" \
+            | awk 'NF' \
+            | head -n 1 || true)
+
+          if [ -z "$LATEST_ZIP" ]; then
+            echo "Git-based detection returned nothing."
+            echo "Falling back to filesystem modification time..."
+
+            LATEST_ZIP=$(find "$DOWNLOAD_DIR" -type f -name "*.zip" -printf "%T@ %p\n" \
+              | sort -nr \
+              | head -n 1 \
+              | awk '{print $2}' || true)
+          fi
+
+          if [ -z "$LATEST_ZIP" ] || [ ! -f "$LATEST_ZIP" ]; then
+            echo "ERROR: Could not identify the latest iFlow ZIP file."
+            exit 1
+          fi
+
+          echo "Latest iFlow ZIP file: $LATEST_ZIP"
+
+          echo "Locating iFlow ID and version from manifest..."
+
+          MATCHED_ENTRY=$(jq --arg z "$LATEST_ZIP" '.artifacts[] | select(.zipFile == $z)' "$MANIFEST_FILE" || true)
+
+          if [ -z "$MATCHED_ENTRY" ] || [ "$MATCHED_ENTRY" = "null" ]; then
+            echo "WARNING: Latest ZIP not present in manifest. Attempting name-based match..."
+
+            LATEST_ZIP_BASENAME=$(basename "$LATEST_ZIP")
+            MATCHED_ENTRY=$(jq --arg name "$LATEST_ZIP_BASENAME" \
+              '.artifacts[] | select(.zipFile | endswith($name))' "$MANIFEST_FILE" || true)
+          fi
+
+          if [ -z "$MATCHED_ENTRY" ] || [ "$MATCHED_ENTRY" = "null" ]; then
+            echo "ERROR: Could not match latest ZIP with any manifest entry."
+            exit 1
+          fi
+
+          LATEST_IFLOW_ID=$(echo "$MATCHED_ENTRY" | jq -r '.id')
+          LATEST_IFLOW_VERSION=$(echo "$MATCHED_ENTRY" | jq -r '.downloadedVersion')
+          LATEST_IFLOW_ZIP=$(echo "$MATCHED_ENTRY" | jq -r '.zipFile')
+
+          echo "------------------------------------------------------------"
+          echo "Latest iFlow selected for deployment"
+          echo "ID       : $LATEST_IFLOW_ID"
+          echo "Version  : $LATEST_IFLOW_VERSION"
+          echo "Zip File : $LATEST_IFLOW_ZIP"
+          echo "------------------------------------------------------------"
+
+          echo "LATEST_IFLOW_ID=$LATEST_IFLOW_ID" >> "$GITHUB_ENV"
+          echo "LATEST_IFLOW_VERSION=$LATEST_IFLOW_VERSION" >> "$GITHUB_ENV"
+          echo "LATEST_IFLOW_ZIP=$LATEST_IFLOW_ZIP" >> "$GITHUB_ENV"
+
+      - name: Validate required GitHub secrets
+        shell: bash
+        env:
+          CTMS_TOKEN_URL: ${{ secrets.CTMS_TOKEN_URL }}
+          CTMS_CLIENT_ID: ${{ secrets.CTMS_CLIENT_ID }}
+          CTMS_CLIENT_SECRET: ${{ secrets.CTMS_CLIENT_SECRET }}
+          CTMS_API_URL: ${{ secrets.CTMS_API_URL }}
+          CTMS_NODE_NAME_QA: ${{ secrets.CTMS_NODE_NAME_QA }}
+        run: |
+          set -euo pipefail
+
+          echo "Validating required CTMS secrets..."
+
+          if [ -z "${CTMS_TOKEN_URL:-}" ]; then
+            echo "ERROR: CTMS_TOKEN_URL secret is missing or empty."
+            exit 1
+          fi
+
+          if [ -z "${CTMS_CLIENT_ID:-}" ]; then
+            echo "ERROR: CTMS_CLIENT_ID secret is missing or empty."
+            exit 1
+          fi
+
+          if [ -z "${CTMS_CLIENT_SECRET:-}" ]; then
+            echo "ERROR: CTMS_CLIENT_SECRET secret is missing or empty."
+            exit 1
+          fi
+
+          if [ -z "${CTMS_API_URL:-}" ]; then
+            echo "ERROR: CTMS_API_URL secret is missing or empty."
+            exit 1
+          fi
+
+          if [ -z "${CTMS_NODE_NAME_QA:-}" ]; then
+            echo "ERROR: CTMS_NODE_NAME_QA secret is missing or empty."
+            exit 1
+          fi
+
+          if [ "${CTMS_TOKEN_URL#https://}" = "$CTMS_TOKEN_URL" ]; then
+            echo "ERROR: CTMS_TOKEN_URL must start with https://"
+            exit 1
+          fi
+
+          if [ "${CTMS_API_URL#https://}" = "$CTMS_API_URL" ]; then
+            echo "ERROR: CTMS_API_URL must start with https://"
+            exit 1
+          fi
+
+          echo "All CTMS secrets are configured."
+
+      - name: Get CTMS OAuth token
+        shell: bash
+        env:
+          CTMS_TOKEN_URL: ${{ secrets.CTMS_TOKEN_URL }}
+          CTMS_CLIENT_ID: ${{ secrets.CTMS_CLIENT_ID }}
+          CTMS_CLIENT_SECRET: ${{ secrets.CTMS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+
+          CTMS_TOKEN_URL="${CTMS_TOKEN_URL%/}"
+          TOKEN_ENDPOINT="$CTMS_TOKEN_URL"
+
+          TOKEN_ENDPOINT_WITHOUT_SUFFIX="${TOKEN_ENDPOINT%/oauth/token}"
+
+          if [ "$TOKEN_ENDPOINT_WITHOUT_SUFFIX" = "$TOKEN_ENDPOINT" ]; then
+            TOKEN_ENDPOINT="$TOKEN_ENDPOINT/oauth/token"
+          fi
+
+          echo "Requesting CTMS OAuth token..."
+
+          TOKEN_RESPONSE=$(curl -sS \
+            --request POST "$TOKEN_ENDPOINT" \
+            --user "$CTMS_CLIENT_ID:$CTMS_CLIENT_SECRET" \
+            --header "Content-Type: application/x-www-form-urlencoded" \
+            --data "grant_type=client_credentials" \
+            --write-out "\nHTTP_CODE=%{http_code}")
+
+          HTTP_CODE=$(echo "$TOKEN_RESPONSE" | sed -n 's/^HTTP_CODE=//p')
+          BODY=$(echo "$TOKEN_RESPONSE" | sed '/^HTTP_CODE=/d')
+
+          echo "Token HTTP status: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Failed to get CTMS OAuth token."
+            echo "$BODY"
+            exit 1
+          fi
+
+          ACCESS_TOKEN=$(echo "$BODY" | jq -r '.access_token')
+
+          if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
+            echo "ERROR: access_token not found in CTMS token response."
+            echo "$BODY"
+            exit 1
+          fi
+
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "CTMS_ACCESS_TOKEN=$ACCESS_TOKEN" >> "$GITHUB_ENV"
+
+          echo "CTMS OAuth token generated successfully."
+
+      - name: Verify latest iFlow ZIP exists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "$LATEST_IFLOW_ZIP" ]; then
+            echo "ERROR: Latest iFlow ZIP file not found: $LATEST_IFLOW_ZIP"
+            exit 1
+          fi
+
+          echo "Latest iFlow ZIP verified: $LATEST_IFLOW_ZIP"
+
+      - name: Upload latest iFlow to CTMS, create TR, import to QA
+        shell: bash
+        env:
+          CTMS_API_URL: ${{ secrets.CTMS_API_URL }}
+          CTMS_NODE_NAME_QA: ${{ secrets.CTMS_NODE_NAME_QA }}
+          CTMS_NAMED_USER: ${{ secrets.CTMS_NAMED_USER }}
+        run: |
+          set -euo pipefail
+
+          CTMS_API_URL="${CTMS_API_URL%/}"
+          NAMED_USER="${CTMS_NAMED_USER:-github-actions[bot]}"
+
+          echo "Starting CTMS deployment to QA node: $CTMS_NODE_NAME_QA"
+
+          TR_METADATA_DESCRIPTION="Deploy $LATEST_IFLOW_ID $LATEST_IFLOW_VERSION | $TR_DESCRIPTION | commit=${GITHUB_SHA:0:7}"
+
+          echo "============================================================"
+          echo "Deploying latest iFlow to QA"
+          echo "ID       : $LATEST_IFLOW_ID"
+          echo "Version  : $LATEST_IFLOW_VERSION"
+          echo "Zip File : $LATEST_IFLOW_ZIP"
+          echo "Node     : $CTMS_NODE_NAME_QA"
+          echo "============================================================"
+
+          # ---------------------------------------------------------------
+          # STEP 1: Upload file to CTMS
+          # ---------------------------------------------------------------
+          echo "Step 1: Uploading ZIP to CTMS..."
+
+          UPLOAD_RESPONSE_FILE="ctms-upload-response.json"
+
+          UPLOAD_HTTP_CODE=$(curl -sS \
+            --connect-timeout 15 \
+            --max-time 120 \
+            --request POST "$CTMS_API_URL/v2/files/upload" \
+            --header "Authorization: Bearer $CTMS_ACCESS_TOKEN" \
+            --header "Accept: application/json" \
+            --form "file=@$LATEST_IFLOW_ZIP" \
+            --form "namedUser=$NAMED_USER" \
+            --output "$UPLOAD_RESPONSE_FILE" \
+            --write-out "%{http_code}")
+
+          echo "Upload HTTP status: $UPLOAD_HTTP_CODE"
+
+          if [ "$UPLOAD_HTTP_CODE" != "200" ] && [ "$UPLOAD_HTTP_CODE" != "201" ]; then
+            echo "ERROR: Failed to upload $LATEST_IFLOW_ID to CTMS."
+            cat "$UPLOAD_RESPONSE_FILE" || true
+            exit 1
+          fi
+
+          FILE_ID=$(jq -r '.fileId' "$UPLOAD_RESPONSE_FILE")
+
+          if [ -z "$FILE_ID" ] || [ "$FILE_ID" = "null" ]; then
+            echo "ERROR: fileId not found in CTMS upload response."
+            cat "$UPLOAD_RESPONSE_FILE" || true
+            exit 1
+          fi
+
+          echo "Uploaded to CTMS. fileId: $FILE_ID"
+
+          # ---------------------------------------------------------------
+          # STEP 2: Create TR on the QA node
+          # ---------------------------------------------------------------
+          echo "Step 2: Creating Transport Request on QA node..."
+
+          TR_CREATE_REQUEST_FILE="ctms-tr-request.json"
+          TR_CREATE_RESPONSE_FILE="ctms-tr-response.json"
+
+          jq -n \
+            --arg nodeName "$CTMS_NODE_NAME_QA" \
+            --arg contentType "MTA" \
+            --arg description "$TR_METADATA_DESCRIPTION" \
+            --arg namedUser "$NAMED_USER" \
+            --argjson fileId "$FILE_ID" \
+            '{
+              nodeName: $nodeName,
+              contentType: $contentType,
+              storageType: "FILE",
+              description: $description,
+              namedUser: $namedUser,
+              entries: [
+                {
+                  uri: ($fileId | tostring)
+                }
+              ]
+            }' > "$TR_CREATE_REQUEST_FILE"
+
+          TR_HTTP_CODE=$(curl -sS \
+            --connect-timeout 15 \
+            --max-time 60 \
+            --request POST "$CTMS_API_URL/v2/nodes/upload" \
+            --header "Authorization: Bearer $CTMS_ACCESS_TOKEN" \
+            --header "Content-Type: application/json" \
+            --header "Accept: application/json" \
+            --data "@$TR_CREATE_REQUEST_FILE" \
+            --output "$TR_CREATE_RESPONSE_FILE" \
+            --write-out "%{http_code}")
+
+          echo "TR creation HTTP status: $TR_HTTP_CODE"
+
+          if [ "$TR_HTTP_CODE" != "200" ] && [ "$TR_HTTP_CODE" != "201" ]; then
+            echo "ERROR: Failed to create Transport Request for $LATEST_IFLOW_ID."
+            cat "$TR_CREATE_RESPONSE_FILE" || true
+            exit 1
+          fi
+
+          TR_ID=$(jq -r '.transportRequestId // .id // .transportRequestDescription.id' "$TR_CREATE_RESPONSE_FILE")
+
+          if [ -z "$TR_ID" ] || [ "$TR_ID" = "null" ]; then
+            echo "ERROR: TR ID not found in response."
+            cat "$TR_CREATE_RESPONSE_FILE" || true
+            exit 1
+          fi
+
+          echo "Transport Request created: TR ID = $TR_ID"
+
+          # ---------------------------------------------------------------
+          # STEP 3: Poll TR status until import completes
+          # ---------------------------------------------------------------
+          echo "Step 3: Waiting for TR import completion..."
+
+          FINAL_STATUS=""
+          MAX_TRIES=30
+          SLEEP_SECONDS=10
+
+          for TRY_NUM in $(seq 1 "$MAX_TRIES"); do
+            STATUS_RESPONSE_FILE="ctms-tr-status-${TRY_NUM}.json"
+
+            STATUS_HTTP_CODE=$(curl -sS \
+              --connect-timeout 15 \
+              --max-time 45 \
+              --request GET "$CTMS_API_URL/v2/transportRequests/$TR_ID" \
+              --header "Authorization: Bearer $CTMS_ACCESS_TOKEN" \
+              --header "Accept: application/json" \
+              --output "$STATUS_RESPONSE_FILE" \
+              --write-out "%{http_code}")
+
+            if [ "$STATUS_HTTP_CODE" != "200" ]; then
+              echo "WARNING: TR status check HTTP $STATUS_HTTP_CODE, retrying..."
+              sleep "$SLEEP_SECONDS"
+              continue
+            fi
+
+            CURRENT_STATUS=$(jq -r '.status // .transportStatus // "UNKNOWN"' "$STATUS_RESPONSE_FILE")
+
+            echo "Attempt $TRY_NUM: TR $TR_ID status = $CURRENT_STATUS"
+
+            case "$CURRENT_STATUS" in
+              Finished|SUCCESS|SUCCESSFUL|IMPORTED|IMPORT_SUCCESS)
+                FINAL_STATUS="Success"
+                break
+                ;;
+              Failed|FAILED|ERROR|IMPORT_FAILED|IMPORT_ERROR)
+                FINAL_STATUS="Failed"
+                break
+                ;;
+              *)
+                sleep "$SLEEP_SECONDS"
+                ;;
+            esac
+          done
+
+          if [ -z "$FINAL_STATUS" ]; then
+            echo "WARNING: TR $TR_ID did not reach a final status within timeout."
+            FINAL_STATUS="Unknown"
+          fi
+
+          echo "TR $TR_ID final status: $FINAL_STATUS"
+
+          # ---------------------------------------------------------------
+          # STEP 4: Deployment summary
+          # ---------------------------------------------------------------
+          jq -n \
+            --arg iflowId "$LATEST_IFLOW_ID" \
+            --arg version "$LATEST_IFLOW_VERSION" \
+            --arg zip "$LATEST_IFLOW_ZIP" \
+            --arg trId "$TR_ID" \
+            --arg qaNode "$CTMS_NODE_NAME_QA" \
+            --arg status "$FINAL_STATUS" \
+            --arg description "$TR_METADATA_DESCRIPTION" \
+            '{
+              iflowId: $iflowId,
+              version: $version,
+              zipFile: $zip,
+              qaNode: $qaNode,
+              transportRequestId: $trId,
+              trDescription: $description,
+              deploymentStatus: $status
+            }' > ctms-deployment-summary.json
+
+          echo "Deployment summary:"
+          cat ctms-deployment-summary.json
+
+          if [ "$FINAL_STATUS" = "Failed" ]; then
+            echo "ERROR: Deployment failed for iFlow $LATEST_IFLOW_ID"
+            exit 1
+          fi
+
+      - name: Upload deployment summary as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctms-deployment-summary
+          path: ctms-deployment-summary.json
+          if-no-files-found: warn
