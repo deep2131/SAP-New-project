@@ -13,6 +13,11 @@ on:
     # GitHub cron runs in UTC
    # - cron: "30 3,12 * * *"
 
+# Prevents overlapping runs of this workflow on the same target branch
+concurrency:
+  group: download-ready-iflows-${{ github.event.inputs.target_branch || 'Feature' }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -27,7 +32,7 @@ jobs:
     name: Download X.Y.Z.ReadyForDeployment iFlows from SAP CPI
     runs-on: ubuntu-latest
 
-    # Keep this only if secrets are stored under GitHub Environment secrets..
+    # Keep this only if secrets are stored under GitHub Environment secrets.
     environment: dev
 
     steps:
@@ -603,6 +608,9 @@ jobs:
           fi
 
           git commit -m "Download SAP BTP iFlows saved as X.Y.Z.ReadyForDeployment (skip existing)"
+
+          # Safer push in case another run recently pushed to the same branch
+          git pull --rebase origin "$TARGET_BRANCH" || true
           git push origin "$TARGET_BRANCH"
 
           echo "Downloaded iFlows pushed to branch: $TARGET_BRANCH"
