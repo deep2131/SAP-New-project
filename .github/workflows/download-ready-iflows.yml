@@ -343,11 +343,12 @@ jobs:
           SELECTED_COUNT=$(jq length selected-iflows.json)
 
           if [ "$SELECTED_COUNT" -eq 0 ]; then
-            echo "No iFlows found with saved version format X.Y.Z.ReadyForDeployment (case-sensitive)."
-            exit 0
+            echo "::notice title=No matching iFlows::No iFlows found with saved version format X.Y.Z.ReadyForDeployment (case-sensitive)."
+            echo "SKIP_DOWNLOAD=true" >> "$GITHUB_ENV"
           fi
 
       - name: Skip iFlows already present in feature branch
+        if: env.SKIP_DOWNLOAD != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -417,11 +418,12 @@ jobs:
           mv new-selected-iflows.json selected-iflows.json
 
           if [ "$NEW_COUNT" -eq 0 ]; then
-            echo "All discovered iFlows are already present in the feature branch. Nothing new to download."
-            exit 0
+            echo "::notice title=No new iFlows::All discovered iFlows are already present in the feature branch. Nothing new to download."
+            echo "SKIP_DOWNLOAD=true" >> "$GITHUB_ENV"
           fi
 
       - name: Download selected iFlows using their SAP saved version
+        if: env.SKIP_DOWNLOAD != 'true'
         shell: bash
         env:
           SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
@@ -551,16 +553,18 @@ jobs:
           echo "Failed iFlows count    : $FAILED_COUNT"
 
           if [ "$SUCCESS_COUNT" -eq 0 ]; then
-            echo "ERROR: No new iFlows were downloaded."
-            exit 1
+            echo "::notice title=No new download::No new iFlows required download. All are already present."
+            echo "SKIP_DOWNLOAD=true" >> "$GITHUB_ENV"
+            exit 0
           fi
 
           if [ "$FAILED_COUNT" -gt 0 ]; then
-            echo "WARNING: Some iFlows failed to download."
+            echo "::warning title=Some downloads failed::Some iFlows failed to download."
             cat failed-iflows.json
           fi
 
       - name: Create download manifest
+        if: env.SKIP_DOWNLOAD != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -586,6 +590,7 @@ jobs:
           cat "$MANIFEST_FILE"
 
       - name: Commit and push downloaded iFlows
+        if: env.SKIP_DOWNLOAD != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -593,7 +598,7 @@ jobs:
           git add "$DOWNLOAD_DIR"
 
           if git diff --staged --quiet; then
-            echo "No changes detected. Nothing to commit."
+            echo "::notice title=Nothing to commit::No new files were staged."
             exit 0
           fi
 
@@ -601,3 +606,10 @@ jobs:
           git push origin "$TARGET_BRANCH"
 
           echo "Downloaded iFlows pushed to branch: $TARGET_BRANCH"
+
+      - name: Report clean run when nothing new was found
+        if: env.SKIP_DOWNLOAD == 'true'
+        shell: bash
+        run: |
+          echo "::notice title=Pipeline completed cleanly::All discovered iFlows are already present in the feature branch. No new download performed."
+          echo "Pipeline status: SUCCESS"
