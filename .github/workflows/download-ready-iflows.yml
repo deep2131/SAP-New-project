@@ -50,7 +50,8 @@ jobs:
           echo "TARGET_BRANCH=$TARGET_BRANCH_VALUE" >> "$GITHUB_ENV"
 
           echo "Target branch resolved: $TARGET_BRANCH_VALUE"
-          echo "Deployment marker: $DEPLOYMENT_MARKER"
+          echo "Deployment marker    : $DEPLOYMENT_MARKER"
+          echo "Filter mode          : CASE-SENSITIVE"
 
       - name: Validate required GitHub secrets
         shell: bash
@@ -265,11 +266,14 @@ jobs:
           import json
           import re
 
-          # Case-insensitive match so 'ReadyFordeployment' typos are handled.
-          # Strict format: X.Y.Z.ReadyForDeployment
+          # CASE-SENSITIVE strict match.
+          # Only accepts: X.Y.Z.ReadyForDeployment
+          # Examples:
+          #   1.1.2.ReadyForDeployment  --> VALID
+          #   1.0.1.ReadyFordeployment  --> INVALID
+          #   1.0.1.readyfordeployment  --> INVALID
           version_pattern = re.compile(
-              r"^(\d+)\.(\d+)\.(\d+)\.readyfordeployment$",
-              re.IGNORECASE
+              r"^(\d+)\.(\d+)\.(\d+)\.ReadyForDeployment$"
           )
 
           with open("active-artifacts-response.json", "r", encoding="utf-8") as file:
@@ -312,7 +316,7 @@ jobs:
                       "name": artifact_name,
                       "packageId": package_id,
                       "versionFromSAP": artifact_version,
-                      "reason": "SAP saved version does not match X.Y.Z.ReadyForDeployment"
+                      "reason": "SAP saved version does not match X.Y.Z.ReadyForDeployment (case-sensitive)"
                   })
 
           with open("selected-iflows.json", "w", encoding="utf-8") as file:
@@ -343,7 +347,7 @@ jobs:
           SELECTED_COUNT=$(jq length selected-iflows.json)
 
           if [ "$SELECTED_COUNT" -eq 0 ]; then
-            echo "No iFlows found with saved version format X.Y.Z.ReadyForDeployment."
+            echo "No iFlows found with saved version format X.Y.Z.ReadyForDeployment (case-sensitive)."
             exit 0
           fi
 
@@ -501,7 +505,8 @@ jobs:
               downloadedAtUtc: $downloadedAt,
               targetBranch: $targetBranch,
               acceptedVersionFormat: $acceptedVersionFormat,
-              selectionRule: "Pipeline reads SAP artifact Version field and downloads only those matching X.Y.Z.ReadyForDeployment.",
+              filterMode: "CASE-SENSITIVE",
+              selectionRule: "Pipeline reads SAP artifact Version field and downloads only those matching X.Y.Z.ReadyForDeployment strictly.",
               downloadRule: "Download URL uses IntegrationDesigntimeArtifacts(Id=<id>,Version=<saved SAP version>)/$value.",
               artifacts: .
             }' matched-iflows.json > "$MANIFEST_FILE"
@@ -521,7 +526,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Download SAP BTP iFlows saved as X.Y.Z.ReadyForDeployment"
+          git commit -m "Download SAP BTP iFlows saved as X.Y.Z.ReadyForDeployment (case-sensitive)"
           git push origin "$TARGET_BRANCH"
 
           echo "Downloaded iFlows pushed to branch: $TARGET_BRANCH"
