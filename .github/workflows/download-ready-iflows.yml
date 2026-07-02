@@ -6,7 +6,7 @@ on:
       target_branch:
         description: "Feature branch where downloaded iFlows will be pushed"
         required: false
-        default: "feature"
+        default: "Feature"
 
 #  schedule:
     # Runs twice daily at 09:00 IST and 18:00 IST
@@ -17,7 +17,7 @@ permissions:
   contents: write
 
 env:
-  TARGET_BRANCH: feature
+  TARGET_BRANCH: Feature
   DEPLOYMENT_MARKER: ReadyForDeployment
   DOWNLOAD_DIR: btp-iflows
   EXTRACT_ZIP: "true"
