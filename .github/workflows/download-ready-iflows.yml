@@ -268,10 +268,6 @@ jobs:
 
           # CASE-SENSITIVE strict match.
           # Only accepts: X.Y.Z.ReadyForDeployment
-          # Examples:
-          #   1.1.2.ReadyForDeployment  --> VALID
-          #   1.0.1.ReadyFordeployment  --> INVALID
-          #   1.0.1.readyfordeployment  --> INVALID
           version_pattern = re.compile(
               r"^(\d+)\.(\d+)\.(\d+)\.ReadyForDeployment$"
           )
@@ -348,6 +344,80 @@ jobs:
 
           if [ "$SELECTED_COUNT" -eq 0 ]; then
             echo "No iFlows found with saved version format X.Y.Z.ReadyForDeployment (case-sensitive)."
+            exit 0
+          fi
+
+      - name: Skip iFlows already present in feature branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Filtering already downloaded iFlows in the feature branch..."
+
+          echo "[]" > new-selected-iflows.json
+          echo "[]" > already-existing-iflows.json
+
+          jq -c '.[]' selected-iflows.json | while read -r item; do
+            IFLOW_ID=$(echo "$item" | jq -r '.id')
+            IFLOW_NAME=$(echo "$item" | jq -r '.name')
+            PACKAGE_ID=$(echo "$item" | jq -r '.packageId // "NA"')
+            IFLOW_VERSION=$(echo "$item" | jq -r '.savedVersion')
+
+            SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
+            SAFE_VERSION=$(echo "$IFLOW_VERSION" | tr -cd '[:alnum:]_.-')
+
+            TARGET_PATH="$DOWNLOAD_DIR/$SAFE_ID/$SAFE_VERSION"
+            EXPECTED_ZIP="$TARGET_PATH/${SAFE_ID}_${SAFE_VERSION}.zip"
+
+            if [ -f "$EXPECTED_ZIP" ]; then
+              echo "SKIP already downloaded: $IFLOW_ID | Version: $IFLOW_VERSION"
+
+              TMP_FILE=$(mktemp)
+              jq \
+                --arg id "$IFLOW_ID" \
+                --arg name "$IFLOW_NAME" \
+                --arg packageId "$PACKAGE_ID" \
+                --arg version "$IFLOW_VERSION" \
+                --arg zipFile "$EXPECTED_ZIP" \
+                '. + [{
+                  id: $id,
+                  name: $name,
+                  packageId: $packageId,
+                  savedVersion: $version,
+                  zipFile: $zipFile,
+                  status: "AlreadyDownloaded"
+                }]' already-existing-iflows.json > "$TMP_FILE"
+              mv "$TMP_FILE" already-existing-iflows.json
+            else
+              echo "NEW download required: $IFLOW_ID | Version: $IFLOW_VERSION"
+
+              TMP_FILE=$(mktemp)
+              jq \
+                --arg id "$IFLOW_ID" \
+                --arg name "$IFLOW_NAME" \
+                --arg packageId "$PACKAGE_ID" \
+                --arg version "$IFLOW_VERSION" \
+                '. + [{
+                  id: $id,
+                  name: $name,
+                  packageId: $packageId,
+                  savedVersion: $version
+                }]' new-selected-iflows.json > "$TMP_FILE"
+              mv "$TMP_FILE" new-selected-iflows.json
+            fi
+          done
+
+          NEW_COUNT=$(jq length new-selected-iflows.json)
+          EXISTING_COUNT=$(jq length already-existing-iflows.json)
+
+          echo "iFlows already in feature branch: $EXISTING_COUNT"
+          echo "iFlows requiring new download   : $NEW_COUNT"
+
+          # Replace selected-iflows.json with the filtered set
+          mv new-selected-iflows.json selected-iflows.json
+
+          if [ "$NEW_COUNT" -eq 0 ]; then
+            echo "All discovered iFlows are already present in the feature branch. Nothing new to download."
             exit 0
           fi
 
@@ -478,10 +548,10 @@ jobs:
           FAILED_COUNT=$(jq length failed-iflows.json)
 
           echo "Downloaded iFlows count: $SUCCESS_COUNT"
-          echo "Failed iFlows count: $FAILED_COUNT"
+          echo "Failed iFlows count    : $FAILED_COUNT"
 
           if [ "$SUCCESS_COUNT" -eq 0 ]; then
-            echo "ERROR: No iFlows were downloaded."
+            echo "ERROR: No new iFlows were downloaded."
             exit 1
           fi
 
@@ -506,6 +576,7 @@ jobs:
               targetBranch: $targetBranch,
               acceptedVersionFormat: $acceptedVersionFormat,
               filterMode: "CASE-SENSITIVE",
+              deduplicationRule: "iFlow ID + Version already present in feature branch will not be downloaded again.",
               selectionRule: "Pipeline reads SAP artifact Version field and downloads only those matching X.Y.Z.ReadyForDeployment strictly.",
               downloadRule: "Download URL uses IntegrationDesigntimeArtifacts(Id=<id>,Version=<saved SAP version>)/$value.",
               artifacts: .
@@ -526,7 +597,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Download SAP BTP iFlows saved as X.Y.Z.ReadyForDeployment (case-sensitive)"
+          git commit -m "Download SAP BTP iFlows saved as X.Y.Z.ReadyForDeployment (skip existing)"
           git push origin "$TARGET_BRANCH"
 
           echo "Downloaded iFlows pushed to branch: $TARGET_BRANCH"
