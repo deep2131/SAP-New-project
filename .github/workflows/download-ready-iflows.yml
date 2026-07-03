@@ -2,10 +2,14 @@ name: Download ReadyForDeployment iFlows from SAP BTP
 
 on:
   workflow_dispatch:
-#  schedule:
-    # Runs twice daily at 09:00 IST and 18:00 IST (UTC cron)
-    # - cron: "30 3,12 * * *"
-    
+
+  schedule:
+    # Runs twice daily at 09:00 IST and 18:00 IST (UTC)
+    # 03:30 UTC = 09:00 IST
+    # 12:30 UTC = 18:00 IST
+    # NOTE: Cron only works when this workflow file is in the default branch (main)
+    - cron: "30 3,12 * * *"
+
 permissions:
   contents: write
 
@@ -27,20 +31,7 @@ jobs:
     environment: dev
 
     steps:
-      - name: Verify workflow is running from feature branch
-        shell: bash
-        run: |
-          set -euo pipefail
-          CURRENT_REF="${GITHUB_REF#refs/heads/}"
-          if [ "$CURRENT_REF" != "$TARGET_BRANCH" ]; then
-            echo " ERROR: This workflow must run from '$TARGET_BRANCH' branch."
-            echo " Currently running from: $CURRENT_REF"
-            echo " Select '$TARGET_BRANCH' in the 'Use workflow from' dropdown."
-            exit 1
-          fi
-          echo "Correct branch: $CURRENT_REF"
-
-      - name: Checkout repository
+      - name: Checkout target branch
         uses: actions/checkout@v4
         with:
           ref: ${{ env.TARGET_BRANCH }}
@@ -59,6 +50,7 @@ jobs:
           echo "═══════════════════════════════════════════════════════════"
           echo "Configuration"
           echo "═══════════════════════════════════════════════════════════"
+          echo "Trigger           : ${{ github.event_name }}"
           echo "Target branch     : $TARGET_BRANCH"
           echo "Deployment marker : $DEPLOYMENT_MARKER"
           echo "Download dir      : $DOWNLOAD_DIR"
@@ -68,11 +60,11 @@ jobs:
           check_secret() {
             local name="$1" value="$2" prefix="${3:-}"
             if [ -z "${value:-}" ]; then
-              echo "ERROR: $name is missing or empty."
+              echo "❌ ERROR: $name is missing or empty."
               exit 1
             fi
             if [ -n "$prefix" ] && [ "${value#$prefix}" = "$value" ]; then
-              echo "ERROR: $name must start with $prefix"
+              echo "❌ ERROR: $name must start with $prefix"
               exit 1
             fi
           }
@@ -82,7 +74,7 @@ jobs:
           check_secret "SAP_BTP_OAUTH_CLIENT_SECRET" "$SAP_BTP_OAUTH_CLIENT_SECRET"
           check_secret "SAP_CPI_API_BASE_URL" "$SAP_CPI_API_BASE_URL" "https://"
 
-          echo "All secrets validated."
+          echo "✅ All secrets validated."
 
       - name: Setup Git
         shell: bash
@@ -90,7 +82,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          echo "Git configured. On branch: $TARGET_BRANCH"
+          echo "✅ Git configured. On branch: $TARGET_BRANCH"
 
       - name: Get SAP BTP OAuth token
         shell: bash
@@ -104,7 +96,7 @@ jobs:
           TOKEN_URL="${SAP_BTP_TOKEN_URL%/}"
           [ "${TOKEN_URL%/oauth/token}" = "$TOKEN_URL" ] && TOKEN_URL="$TOKEN_URL/oauth/token"
 
-          echo "Requesting SAP OAuth token..."
+          echo "🔑 Requesting SAP OAuth token..."
 
           RESPONSE=$(curl -sS \
             -w "\nHTTP_CODE=%{http_code}" \
@@ -117,17 +109,17 @@ jobs:
           BODY=$(echo "$RESPONSE" | sed '/^HTTP_CODE=/d')
 
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "Token request failed (HTTP $HTTP_CODE)"
+            echo "❌ Token request failed (HTTP $HTTP_CODE)"
             echo "$BODY"
             exit 1
           fi
 
           TOKEN=$(echo "$BODY" | jq -r '.access_token // empty')
-          [ -z "$TOKEN" ] && { echo "No access_token in response"; exit 1; }
+          [ -z "$TOKEN" ] && { echo "❌ No access_token in response"; exit 1; }
 
           echo "::add-mask::$TOKEN"
           echo "SAP_ACCESS_TOKEN=$TOKEN" >> "$GITHUB_ENV"
-          echo "Token obtained."
+          echo "✅ Token obtained."
 
       - name: Discover matching iFlows from SAP CPI
         shell: bash
@@ -148,11 +140,11 @@ jobs:
               -o "$output"
           }
 
-          echo "Fetching IntegrationPackages..."
+          echo "📋 Fetching IntegrationPackages..."
           HTTP_CODE=$(cpi_get "$API_BASE/api/v1/IntegrationPackages?\$format=json" packages.json)
 
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "Failed to fetch packages (HTTP $HTTP_CODE)"
+            echo "❌ Failed to fetch packages (HTTP $HTTP_CODE)"
             cat packages.json
             exit 1
           fi
@@ -173,18 +165,26 @@ jobs:
               jq -s '{d:{results:((.[0].d.results // []) + (.[1].d.results // []))}}' \
                 all-artifacts.json "$PKG_FILE" > merged.json
               mv merged.json all-artifacts.json
-              echo "$PKG_ID"
+              echo "  ✅ $PKG_ID"
             else
-              echo "Skipped $PKG_ID (HTTP $HTTP_CODE)"
+              echo "  ⚠️  Skipped $PKG_ID (HTTP $HTTP_CODE)"
             fi
           done
 
           TOTAL=$(jq '.d.results | length' all-artifacts.json)
-          echo "Total artifacts discovered: $TOTAL"
+          echo "📊 Total artifacts discovered: $TOTAL"
 
+          echo "🔍 Version field types (for debugging):"
+          jq -r '.d.results[] | "  \(.Id // "unknown"): Version=\(.Version // "null") (type: \(.Version | type))"' all-artifacts.json
+
+          # Type-safe filter: only apply regex to string versions
           jq --arg pattern "$VERSION_REGEX" '
             [.d.results[]
-              | select(.Id != null and (.Version // "") | test($pattern))
+              | select(
+                  .Id != null
+                  and (.Version | type == "string")
+                  and (.Version | test($pattern))
+                )
               | {
                   id: .Id,
                   packageId: .PackageId,
@@ -194,8 +194,8 @@ jobs:
           ' all-artifacts.json > selected-iflows.json
 
           MATCHED=$(jq length selected-iflows.json)
-          echo "iFlows matching X.Y.Z.$DEPLOYMENT_MARKER: $MATCHED"
-          jq -r '.[] | "\(.id) | \(.packageId) | v\(.savedVersion)"' selected-iflows.json
+          echo "🎯 iFlows matching X.Y.Z.$DEPLOYMENT_MARKER: $MATCHED"
+          jq -r '.[] | "  ✅ \(.id) | \(.packageId) | v\(.savedVersion)"' selected-iflows.json
 
           if [ "$MATCHED" -eq 0 ]; then
             echo "::notice title=No matching iFlows::No iFlows found with version X.Y.Z.$DEPLOYMENT_MARKER"
@@ -220,10 +220,10 @@ jobs:
             SAFE_VER=$(echo "$VERSION" | tr -cd '[:alnum:]_.-')
 
             if [ -f "$DOWNLOAD_DIR/$SAFE_ID/$SAFE_VER/${SAFE_ID}_${SAFE_VER}.zip" ]; then
-              echo "Already exists: $IFLOW_ID v$VERSION"
+              echo "  ⏭️  Already exists: $IFLOW_ID v$VERSION"
               EXISTING_COUNT=$((EXISTING_COUNT + 1))
             else
-              echo "New: $IFLOW_ID v$VERSION"
+              echo "  🆕 New: $IFLOW_ID v$VERSION"
               echo "$item" | jq -s '.' | jq -s '.[0] + .[1]' new-iflows.json - > tmp.json
               mv tmp.json new-iflows.json
               NEW_COUNT=$((NEW_COUNT + 1))
@@ -232,7 +232,7 @@ jobs:
 
           mv new-iflows.json selected-iflows.json
 
-          echo "Existing: $EXISTING_COUNT | New: $NEW_COUNT"
+          echo "📊 Existing: $EXISTING_COUNT | New: $NEW_COUNT"
 
           if [ "$NEW_COUNT" -eq 0 ]; then
             echo "::notice title=No new iFlows::All discovered iFlows already exist in the branch."
@@ -248,8 +248,6 @@ jobs:
           set -euo pipefail
 
           API_BASE="${SAP_CPI_API_BASE_URL%/}"
-          SUCCESS=0
-          FAILED=0
 
           jq -c '.[]' selected-iflows.json | while read -r item; do
             IFLOW_ID=$(echo "$item" | jq -r '.id')
@@ -267,7 +265,7 @@ jobs:
             URL="$API_BASE/api/v1/IntegrationDesigntimeArtifacts(Id='$ODATA_ID',Version='$ODATA_VER')/\$value"
 
             echo "─────────────────────────────────────────────"
-            echo "$IFLOW_ID | v$VERSION"
+            echo "⬇️  $IFLOW_ID | v$VERSION"
 
             HTTP_CODE=$(curl -sS \
               --connect-timeout 10 \
@@ -279,7 +277,7 @@ jobs:
               -o "$ZIP_FILE")
 
             if [ "$HTTP_CODE" = "200" ] && [ -s "$ZIP_FILE" ]; then
-              echo "Downloaded ($HTTP_CODE)"
+              echo "  ✅ Downloaded ($HTTP_CODE)"
 
               if [ "$EXTRACT_ZIP" = "true" ]; then
                 EXTRACT_PATH="$TARGET_PATH/extracted"
@@ -287,23 +285,20 @@ jobs:
                 mkdir -p "$EXTRACT_PATH"
                 if unzip -tq "$ZIP_FILE" >/dev/null 2>&1; then
                   unzip -q "$ZIP_FILE" -d "$EXTRACT_PATH"
-                  echo "Extracted"
+                  echo "  📦 Extracted"
                 else
-                  echo "Invalid ZIP, keeping raw file only"
+                  echo "  ⚠️  Invalid ZIP, keeping raw file only"
                 fi
               fi
             else
-              echo "Failed (HTTP $HTTP_CODE)"
+              echo "  ❌ Failed (HTTP $HTTP_CODE)"
               rm -f "$ZIP_FILE"
               rmdir "$TARGET_PATH" 2>/dev/null || true
             fi
           done
 
-          # Count actual downloaded ZIPs
-          SUCCESS=$(find "$DOWNLOAD_DIR" -name "*.zip" -newer selected-iflows.json 2>/dev/null | wc -l || echo 0)
-
           echo "═══════════════════════════════════════════════"
-          echo "Total ZIPs in $DOWNLOAD_DIR: $(find "$DOWNLOAD_DIR" -name "*.zip" | wc -l)"
+          echo "📊 Total ZIPs in $DOWNLOAD_DIR: $(find "$DOWNLOAD_DIR" -name "*.zip" | wc -l)"
           echo "═══════════════════════════════════════════════"
 
       - name: Commit and push downloaded iFlows
@@ -323,18 +318,18 @@ jobs:
 
           git fetch origin "$TARGET_BRANCH"
           if ! git pull --rebase origin "$TARGET_BRANCH"; then
-            echo "Rebase conflict detected"
+            echo "⚠️  Rebase conflict detected"
             git rebase --abort || true
-            echo "Cannot push safely. Please resolve conflicts manually."
+            echo "❌ Cannot push safely. Please resolve conflicts manually."
             exit 1
           fi
 
           git push origin "$TARGET_BRANCH"
-          echo "Pushed to branch: $TARGET_BRANCH"
+          echo "🚀 Pushed to branch: $TARGET_BRANCH"
 
       - name: Report clean run
         if: env.SKIP_DOWNLOAD == 'true'
         shell: bash
         run: |
           echo "::notice title=Success::All iFlows are already downloaded. Nothing new."
-          echo "Pipeline status: SUCCESS"
+          echo "✅ Pipeline status: SUCCESS"
