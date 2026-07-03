@@ -1,4 +1,3 @@
-----
 name: Download ReadyForDeployment iFlows from SAP BTP
 
 on:
@@ -13,6 +12,7 @@ on:
     # Runs twice daily at 09:00 IST and 18:00 IST
     # GitHub cron runs in UTC
    # - cron: "30 3,12 * * *"
+   # enable it once you are ready
 
 # Prevents overlapping runs of this workflow on the same target branch
 concurrency:
