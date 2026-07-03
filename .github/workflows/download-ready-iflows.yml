@@ -1,10 +1,10 @@
-name: Download ReadyForDeployment iFlows from SAP BTP
+name: Download iFlows from SAP BTP
 
 on:
   workflow_dispatch:
     inputs:
       target_branch:
-        description: "Feature branch where downloaded iFlows will be pushed"
+        description: "feature branch where downloaded iFlows will be pushed"
         required: false
         default: "feature"
 
