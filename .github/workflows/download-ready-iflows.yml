@@ -3,12 +3,10 @@ name: Download ReadyForDeployment iFlows from SAP BTP
 on:
   workflow_dispatch:
 
-  schedule:
-    # Runs twice daily at 09:00 IST and 18:00 IST (UTC)
-    # 03:30 UTC = 09:00 IST
-    # 12:30 UTC = 18:00 IST
     # NOTE: Cron only works when this workflow file is in the default branch (main)
-    - cron: "30 3,12 * * *"
+    #  schedule:
+    # Runs twice daily at 09:00 IST and 18:00 IST (UTC cron)
+    # - cron: "30 3,12 * * *"
 
 permissions:
   contents: write
