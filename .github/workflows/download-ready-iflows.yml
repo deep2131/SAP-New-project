@@ -13,8 +13,8 @@ on:
     # GitHub cron runs in UTC
    # - cron: "30 3,12 * * *"
 
-permissions:
-  contents: write
+#permissions:
+  #contents: write
 
 env:
   TARGET_BRANCH: feature
