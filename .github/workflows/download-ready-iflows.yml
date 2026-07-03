@@ -2,19 +2,19 @@ name: Download ReadyForDeployment iFlows from SAP BTP
 
 on:
   workflow_dispatch:
-   # inputs:
-     # target_branch:
-      #  description: "feature branch where downloaded iFlows will be pushed"
-      #  required: false
-       # default: "feature"
+    inputs:
+      target_branch:
+        description: "feature branch where downloaded iFlows will be pushed"
+        required: false
+        default: "feature"
 
 #  schedule:
     # Runs twice daily at 09:00 IST and 18:00 IST
     # GitHub cron runs in UTC
    # - cron: "30 3,12 * * *"
 
-#permissions:
- # contents: write
+permissions:
+  contents: write
 
 env:
   TARGET_BRANCH: feature
