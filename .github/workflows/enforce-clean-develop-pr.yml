@@ -1,0 +1,69 @@
+name: Enforce clean PRs to develop
+
+on:
+  pull_request:
+    branches:
+      - develop
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ensure-empty-commit:
+    name: Verify PR contains only empty commit
+    runs-on: ubuntu-latest
+
+    # Only enforce for auto-generated deploy trigger PRs
+    if: contains(github.event.pull_request.labels.*.name, 'empty-commit-only')
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify no file changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin develop
+          CHANGED_FILES=$(git diff --name-only origin/develop...HEAD)
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "✅ PR contains only empty commits - clean merge guaranteed"
+            exit 0
+          fi
+
+          echo "═══════════════════════════════════════════════════════════"
+          echo "❌ VALIDATION FAILED"
+          echo "═══════════════════════════════════════════════════════════"
+          echo ""
+          echo "This PR is labeled as 'empty-commit-only' but contains file changes:"
+          echo "$CHANGED_FILES" | sed 's/^/  ❌ /'
+          echo ""
+          echo "Empty-commit deploy trigger PRs must contain ZERO file changes."
+          echo "═══════════════════════════════════════════════════════════"
+          exit 1
+
+      - name: Comment on failed validation
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ❌ PR Validation Failed
+
+              This PR is labeled \`empty-commit-only\` but contains file changes.
+
+              ### Rule
+              Deploy trigger PRs must contain **ONLY empty commits** - no file changes at all.
+
+              ### Fix
+              Close this PR and let the automation create a clean one.
+              `
+            });
