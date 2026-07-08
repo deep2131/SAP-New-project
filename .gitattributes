@@ -1,2 +1,3 @@
+.github/workflows/** merge=ours
 btp-iflows/** merge=ours
 btp-iflows-archive/** merge=ours
