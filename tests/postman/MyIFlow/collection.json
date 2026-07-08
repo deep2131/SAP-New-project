@@ -1,0 +1,140 @@
+{
+  "info": {
+    "name": "MyIFlow Tests",
+    "description": "Tests for the MyIFlow integration. Positive + negative + auth scenarios.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "11111111-1111-1111-1111-111111111111"
+  },
+  "auth": {
+    "type": "basic",
+    "basic": [
+      { "key": "username", "value": "{{user}}", "type": "string" },
+      { "key": "password", "value": "{{pwd}}",  "type": "string" }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Fail fast if required env variables are missing.",
+          "['host', 'user', 'pwd'].forEach(k => {",
+          "  if (!pm.environment.get(k)) {",
+          "    throw new Error(`Env variable '${k}' is not set.`);",
+          "  }",
+          "});"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Positive — Valid order",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"orderId\": \"1001\",\n  \"customerId\": \"C-500\",\n  \"amount\": 500.00,\n  \"currency\": \"USD\"\n}"
+        },
+        "url": {
+          "raw": "{{host}}/http/myiflow/orders",
+          "host": ["{{host}}"],
+          "path": ["http", "myiflow", "orders"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status is 200', () => {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Response is JSON', () => {",
+              "  pm.response.to.be.json;",
+              "});",
+              "",
+              "pm.test('Response has orderId', () => {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body).to.have.property('orderId');",
+              "  pm.expect(body.orderId).to.eql('1001');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Negative — Missing amount",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{ \"orderId\": \"1002\" }"
+        },
+        "url": {
+          "raw": "{{host}}/http/myiflow/orders",
+          "host": ["{{host}}"],
+          "path": ["http", "myiflow", "orders"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status is 4xx', () => {",
+              "  pm.expect(pm.response.code).to.be.within(400, 499);",
+              "});",
+              "",
+              "pm.test('Error mentions amount', () => {",
+              "  pm.expect(pm.response.text().toLowerCase()).to.include('amount');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Negative — Unauthorized",
+      "request": {
+        "auth": {
+          "type": "basic",
+          "basic": [
+            { "key": "username", "value": "invalid", "type": "string" },
+            { "key": "password", "value": "invalid", "type": "string" }
+          ]
+        },
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{ \"orderId\": \"1003\", \"amount\": 100 }" },
+        "url": {
+          "raw": "{{host}}/http/myiflow/orders",
+          "host": ["{{host}}"],
+          "path": ["http", "myiflow", "orders"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status is 401', () => {",
+              "  pm.response.to.have.status(401);",
+              "});"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
