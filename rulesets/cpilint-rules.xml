@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ============================================================================
+  CPILint Ruleset — SAP Cloud Integration Governance
+  ============================================================================
+  Owner:       DevOps + Integration Architecture
+  Version:     1.0.0
+  Last update: <YYYY-MM-DD>
+
+  How to use:
+    cpilint -rules ./rulesets/cpilint-rules.xml -files ./btp-iflows/*.zip
+
+  Reference:
+    https://github.com/mwittrock/cpilint/wiki
+
+  Change control:
+    Any change to this file MUST go through PR + Architect approval.
+    Do NOT edit locally. Raise a request to the Architecture DL.
+  ============================================================================
+-->
+<cpilint>
+
+  <!-- ========================================================== -->
+  <!--  1. NAMING CONVENTIONS                                     -->
+  <!-- ========================================================== -->
+
+  <!--
+    iFlow ID must start with a 2–4 letter uppercase domain prefix,
+    followed by underscore, followed by descriptive PascalCase name.
+    Examples:  FI_PostInvoice, HR_EmployeeSync, SD_OrderReplication
+  -->
+  <iflow-name-matches-regex>
+    <regex>^[A-Z]{2,4}_[A-Z][A-Za-z0-9]+$</regex>
+  </iflow-name-matches-regex>
+
+  <!--
+    Sender channels must be prefixed with "S_" and receiver channels with "R_".
+    Helps quickly identify channel direction in the graphical view.
+  -->
+  <sender-channel-name-matches-regex>
+    <regex>^S_[A-Z][A-Za-z0-9_]+$</regex>
+  </sender-channel-name-matches-regex>
+
+  <receiver-channel-name-matches-regex>
+    <regex>^R_[A-Z][A-Za-z0-9_]+$</regex>
+  </receiver-channel-name-matches-regex>
+
+
+  <!-- ========================================================== -->
+  <!--  2. ADAPTER GOVERNANCE                                     -->
+  <!-- ========================================================== -->
+
+  <!--
+    Only approved sender adapters are allowed.
+    Add/remove entries after Architecture review.
+  -->
+  <allowed-sender-adapters>
+    <adapter>HTTPS</adapter>
+    <adapter>SOAP</adapter>
+    <adapter>SFTP</adapter>
+    <adapter>ProcessDirect</adapter>
+    <adapter>Timer</adapter>
+  </allowed-sender-adapters>
+
+  <!--
+    Only approved receiver adapters are allowed.
+    Legacy adapters (IDoc SOAP, plain HTTP) are intentionally excluded.
+  -->
+  <allowed-receiver-adapters>
+    <adapter>HTTP</adapter>
+    <adapter>HTTPS</adapter>
+    <adapter>SOAP</adapter>
+    <adapter>SuccessFactors</adapter>
+    <adapter>OData</adapter>
+    <adapter>SFTP</adapter>
+    <adapter>ProcessDirect</adapter>
+    <adapter>Mail</adapter>
+  </allowed-receiver-adapters>
+
+
+  <!-- ========================================================== -->
+  <!--  3. SECURITY                                               -->
+  <!-- ========================================================== -->
+
+  <!--
+    All HTTP/HTTPS/SOAP receiver channels MUST use CSRF protection.
+    Prevents CSRF attacks on downstream systems.
+  -->
+  <csrf-protection-required>
+    <adapters>
+      <adapter>HTTP</adapter>
+      <adapter>HTTPS</adapter>
+      <adapter>SOAP</adapter>
+    </adapters>
+  </csrf-protection-required>
+
+  <!--
+    Client certificate authentication is preferred over Basic Auth
+    for receiver HTTP/HTTPS calls to internal S/4 systems.
+    Basic auth is disallowed on receiver adapters below.
+  -->
+  <disallowed-receiver-adapter-authentication>
+    <adapter>HTTPS</adapter>
+    <authentication>Basic</authentication>
+  </disallowed-receiver-adapter-authentication>
+
+  <!--
+    Xml Modifier / Content Modifier headers must NOT contain
+    hard-coded passwords or tokens (matched via regex).
+  -->
+  <disallowed-header-value>
+    <regex>(?i)(password|passwd|pwd|token|apikey|secret)\s*[:=]</regex>
+  </disallowed-header-value>
+
+
+  <!-- ========================================================== -->
+  <!--  4. ERROR HANDLING                                         -->
+  <!-- ========================================================== -->
+
+  <!--
+    Every iFlow MUST contain at least one Exception Subprocess.
+    Ensures errors are logged and alerts are raised.
+  -->
+  <exception-subprocess-required/>
+
+
+  <!-- ========================================================== -->
+  <!--  5. MAPPING & TRANSFORMATION                               -->
+  <!-- ========================================================== -->
+
+  <!--
+    Only Message Mapping and XSLT Mapping are permitted.
+    Operation Mapping (from PI/PO) is disallowed to keep everything CPI-native.
+  -->
+  <allowed-mapping-types>
+    <type>MessageMapping</type>
+    <type>XSLT</type>
+  </allowed-mapping-types>
+
+
+  <!-- ========================================================== -->
+  <!--  6. SCRIPTING HYGIENE                                      -->
+  <!-- ========================================================== -->
+
+  <!--
+    Groovy scripts should not exceed 200 lines. Larger scripts
+    indicate business logic that belongs elsewhere.
+  -->
+  <script-max-lines>
+    <language>groovy</language>
+    <max-lines>200</language>
+  </script-max-lines>
+
+  <!--
+    JavaScript scripting is disallowed (Groovy is the org standard).
+  -->
+  <disallowed-scripting-languages>
+    <language>javascript</language>
+  </disallowed-scripting-languages>
+
+  <!--
+    System.out / println / e.printStackTrace are forbidden in Groovy scripts.
+    Use MessageLog (message processing log) instead.
+  -->
+  <disallowed-script-content>
+    <language>groovy</language>
+    <regex>System\.out|println\s*\(|printStackTrace\s*\(</regex>
+  </disallowed-script-content>
+
+
+  <!-- ========================================================== -->
+  <!--  7. CONNECTIVITY & CREDENTIALS                             -->
+  <!-- ========================================================== -->
+
+  <!--
+    Receiver URLs must not be hard-coded. Use externalized parameters
+    or Number Range / Value Mapping / Security Material as appropriate.
+    This regex flags anything that looks like a literal URL.
+  -->
+  <receiver-adapter-url-not-hardcoded/>
+
+  <!--
+    Credential names used in adapters must follow the pattern:
+      <ENV>_<SYSTEM>_<PURPOSE>     e.g. DEV_S4H_OUTBOUND
+    Enforces predictable secret naming across landscapes.
+  -->
+  <credential-name-matches-regex>
+    <regex>^(DEV|QA|PROD)_[A-Z0-9]+_[A-Z0-9_]+$</regex>
+  </credential-name-matches-regex>
+
+
+  <!-- ========================================================== -->
+  <!--  8. MONITORING & TRACEABILITY                              -->
+  <!-- ========================================================== -->
+
+  <!--
+    Every iFlow MUST set the "Log Level" configuration property.
+    Ensures MPL visibility for operations teams.
+  -->
+  <iflow-configuration-required>
+    <property>logLevel</property>
+  </iflow-configuration-required>
+
+</cpilint>
