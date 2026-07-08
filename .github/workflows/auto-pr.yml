@@ -1,0 +1,409 @@
+name: Auto PR from feature to develop
+
+on:
+  workflow_run:
+    workflows: ["Download ReadyForDeployment iFlows from SAP BTP"]
+    types:
+      - completed
+
+  workflow_dispatch:
+    inputs:
+      pr_reason:
+        description: "Manual PR creation reason"
+        required: false
+        default: "Manual QA deployment trigger"
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: auto-pr-develop
+  cancel-in-progress: false
+
+env:
+  FEATURE_BRANCH: feature
+  DEVELOP_BRANCH: develop
+  DOWNLOAD_DIR: btp-iflows
+  DEPLOYMENT_MARKER: ReadyForDeployment
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════
+  # JOB 1: Verify trigger context (must come from feature branch)
+  # ═══════════════════════════════════════════════════════════════
+  verify-trigger:
+    name: Verify trigger from feature branch
+    runs-on: ubuntu-latest
+
+    # Only run if triggered by successful download workflow
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    outputs:
+      should_proceed: ${{ steps.check.outputs.proceed }}
+
+    steps:
+      - name: Verify source branch
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "═══════════════════════════════════════════════════════════"
+          echo "🔍 Verifying trigger context"
+          echo "═══════════════════════════════════════════════════════════"
+          echo "Event type    : ${{ github.event_name }}"
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            SOURCE_BRANCH="${{ github.event.workflow_run.head_branch }}"
+            SOURCE_SHA="${{ github.event.workflow_run.head_sha }}"
+            SOURCE_CONCLUSION="${{ github.event.workflow_run.conclusion }}"
+
+            echo "Source workflow  : ${{ github.event.workflow_run.name }}"
+            echo "Source branch    : $SOURCE_BRANCH"
+            echo "Source conclusion: $SOURCE_CONCLUSION"
+            echo "Source SHA       : ${SOURCE_SHA:0:7}"
+            echo ""
+
+            # STRICT CHECK: Must be from feature branch
+            if [ "$SOURCE_BRANCH" != "$FEATURE_BRANCH" ]; then
+              echo "::error title=Wrong branch::Trigger came from '$SOURCE_BRANCH', not '$FEATURE_BRANCH'"
+              echo "This workflow only accepts triggers from the feature branch."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+
+            echo "✅ Trigger verified from $FEATURE_BRANCH branch"
+          else
+            echo "🖐️  Manual trigger - proceeding with feature branch"
+          fi
+
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+  # ═══════════════════════════════════════════════════════════════
+  # JOB 2: Detect new iFlows on feature branch
+  # ═══════════════════════════════════════════════════════════════
+  detect-iflows:
+    name: Detect new iFlows on feature
+    needs: verify-trigger
+    if: needs.verify-trigger.outputs.should_proceed == 'true'
+    runs-on: ubuntu-latest
+
+    outputs:
+      has_changes: ${{ steps.detect.outputs.has_changes }}
+      iflow_count: ${{ steps.detect.outputs.iflow_count }}
+      iflow_summary: ${{ steps.detect.outputs.iflow_summary }}
+      feature_sha: ${{ steps.detect.outputs.feature_sha }}
+
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FEATURE_BRANCH }}
+          fetch-depth: 50
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compare feature vs develop
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "═══════════════════════════════════════════════════════════"
+          echo "🔍 Analyzing branches"
+          echo "═══════════════════════════════════════════════════════════"
+
+          # Get latest SHAs
+          FEATURE_SHA=$(git rev-parse HEAD)
+          git fetch origin "$DEVELOP_BRANCH"
+          DEVELOP_SHA=$(git rev-parse "origin/$DEVELOP_BRANCH")
+          MERGE_BASE=$(git merge-base HEAD "origin/$DEVELOP_BRANCH")
+
+          echo "Feature HEAD  : ${FEATURE_SHA:0:7}"
+          echo "Develop HEAD  : ${DEVELOP_SHA:0:7}"
+          echo "Merge base    : ${MERGE_BASE:0:7}"
+          echo ""
+
+          echo "feature_sha=$FEATURE_SHA" >> "$GITHUB_OUTPUT"
+
+          # Find NEW iFlow ZIPs added since divergence from develop
+          NEW_ZIPS=$(git diff --name-only --diff-filter=A "$MERGE_BASE" HEAD -- "$DOWNLOAD_DIR/**/*.zip" 2>/dev/null || true)
+
+          IFLOW_COUNT=$(echo "$NEW_ZIPS" | grep -c . || echo 0)
+
+          echo "📦 New iFlows detected: $IFLOW_COUNT"
+
+          if [ "$IFLOW_COUNT" -eq 0 ]; then
+            echo ""
+            echo "::notice title=No new iFlows::Feature branch has no new iFlows since last sync"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "iflow_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "$NEW_ZIPS" | sed 's/^/  📄 /'
+          echo ""
+
+          # Build summary for PR body
+          SUMMARY=""
+          while IFS= read -r zip; do
+            [ -z "$zip" ] && continue
+            IFLOW_ID=$(basename "$(dirname "$(dirname "$zip")")")
+            VERSION=$(basename "$(dirname "$zip")")
+            SUMMARY="${SUMMARY}- **${IFLOW_ID}** \`v${VERSION}\`"$'\n'
+          done <<< "$NEW_ZIPS"
+
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          echo "iflow_count=$IFLOW_COUNT" >> "$GITHUB_OUTPUT"
+
+          # Multi-line output for PR body
+          {
+            echo "iflow_summary<<SUMMARY_EOF"
+            echo "$SUMMARY"
+            echo "SUMMARY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "✅ Detection complete"
+
+  # ═══════════════════════════════════════════════════════════════
+  # JOB 3: Create empty-commit PR to develop
+  # ═══════════════════════════════════════════════════════════════
+  create-pr:
+    name: Create PR (no files transferred)
+    needs: [verify-trigger, detect-iflows]
+    if: needs.detect-iflows.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+
+    outputs:
+      pr_number: ${{ steps.create_pr.outputs.pr_number }}
+      pr_url: ${{ steps.create_pr.outputs.pr_url }}
+      trigger_branch: ${{ steps.create_branch.outputs.trigger_branch }}
+
+    steps:
+      # IMPORTANT: Checkout develop (not feature) so trigger branch is empty
+      - name: Checkout develop branch (base for empty trigger branch)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEVELOP_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "✅ Git configured"
+
+      - name: Create empty trigger branch from develop
+        id: create_branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+          IFLOW_COUNT="${{ needs.detect-iflows.outputs.iflow_count }}"
+          RUN_ID="${{ github.run_id }}"
+          TRIGGER_BRANCH="qa-deploy/${TIMESTAMP}-${IFLOW_COUNT}iflows-run${RUN_ID}"
+
+          echo "═══════════════════════════════════════════════════════════"
+          echo "🌿 Creating empty trigger branch"
+          echo "═══════════════════════════════════════════════════════════"
+          echo "Branch name : $TRIGGER_BRANCH"
+          echo "Base branch : $DEVELOP_BRANCH"
+          echo ""
+
+          # Make sure we have the latest develop
+          git pull origin "$DEVELOP_BRANCH"
+
+          # Create branch from develop (starts with no changes)
+          git checkout -b "$TRIGGER_BRANCH"
+
+          # Confirm the branch is clean vs develop
+          if [ -n "$(git diff origin/$DEVELOP_BRANCH)" ]; then
+            echo "❌ ERROR: Branch has unexpected changes"
+            exit 1
+          fi
+
+          IFLOW_SUMMARY=$(cat << EOF
+${{ needs.detect-iflows.outputs.iflow_summary }}
+EOF
+)
+
+          # Create empty commit as the deployment trigger
+          git commit --allow-empty -m "🚀 [QA Deploy Trigger] ${IFLOW_COUNT} iFlow(s) ready
+
+## Deployment Intent
+This empty commit triggers deploy-to-qa.yml when merged to develop.
+
+## Source
+- Branch : $FEATURE_BRANCH
+- Commit : ${{ needs.detect-iflows.outputs.feature_sha }}
+
+## iFlows to Deploy (${IFLOW_COUNT})
+${IFLOW_SUMMARY}
+
+## Important
+- This commit contains NO file changes
+- iFlow ZIPs remain in the $FEATURE_BRANCH branch
+- On merge, deploy-to-qa.yml reads iFlows from $FEATURE_BRANCH"
+
+          git push origin "$TRIGGER_BRANCH"
+
+          echo "trigger_branch=$TRIGGER_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "✅ Empty trigger branch created and pushed"
+
+      - name: Create Pull Request
+        id: create_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TRIGGER_BRANCH="${{ steps.create_branch.outputs.trigger_branch }}"
+          IFLOW_COUNT="${{ needs.detect-iflows.outputs.iflow_count }}"
+          FEATURE_SHA="${{ needs.detect-iflows.outputs.feature_sha }}"
+          SHORT_SHA="${FEATURE_SHA:0:7}"
+
+          PR_TITLE="🚀 [QA Deploy] ${IFLOW_COUNT} iFlow(s) ready for deployment"
+
+          PR_BODY=$(cat << EOF
+## 🎯 Automated QA Deployment PR
+
+> **⚠️ This PR contains ONLY an empty commit. No files or directories will merge to \`$DEVELOP_BRANCH\`.**
+
+### 📦 iFlows Ready for QA Deployment
+
+${{ needs.detect-iflows.outputs.iflow_summary }}
+
+### 🔄 What Happens On Merge?
+
+1. ✅ Only an empty commit merges to \`$DEVELOP_BRANCH\`
+2. ✅ NO iFlow ZIPs, directories, or files are transferred
+3. ✅ Push event on \`$DEVELOP_BRANCH\` triggers \`deploy-to-qa.yml\`
+4. ✅ Deploy pipeline reads iFlows from \`$FEATURE_BRANCH\` branch
+5. ✅ CTMS transports iFlows to QA
+6. ✅ Deployed iFlows moved to archive on \`$FEATURE_BRANCH\`
+
+### 🔒 Merge Guarantee
+
+| Check | Status |
+|---|---|
+| Empty commit only | ✅ Enforced |
+| No file changes | ✅ Verified |
+| No directory changes | ✅ Verified |
+| Source branch validated | ✅ From \`$FEATURE_BRANCH\` |
+
+### 👥 Approval Required
+
+**This PR requires approval before auto-merge.**
+
+Reviewers should verify:
+- [ ] iFlow list looks correct
+- [ ] No file changes present (empty commit only)
+- [ ] Ready for QA deployment
+
+### 🔗 Traceability
+
+| Field | Value |
+|---|---|
+| Source Branch | \`$FEATURE_BRANCH\` |
+| Feature Commit | \`$SHORT_SHA\` |
+| iFlow Count | ${IFLOW_COUNT} |
+| Triggered By | @${{ github.actor }} |
+| Triggered At | $(date -u +'%Y-%m-%d %H:%M UTC') |
+| Workflow Run | [View](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }-
+
+*Auto-generated by \`auto-pr.yml\` after successful download from SAP CPI.*
+*Will auto-merge once approved. Only empty commit merges to develop.*
+EOF
+)
+
+          # Create the PR
+          PR_URL=$(gh pr create \
+            --base "$DEVELOP_BRANCH" \
+            --head "$TRIGGER_BRANCH" \
+            --title "$PR_TITLE" \
+            --body "$PR_BODY" \
+            --label "auto-generated,qa-deployment,empty-commit-only")
+
+          PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "═══════════════════════════════════════════════════════════"
+          echo "✅ PR Created Successfully"
+          echo "═══════════════════════════════════════════════════════════"
+          echo "PR #      : $PR_NUMBER"
+          echo "PR URL    : $PR_URL"
+          echo "Base      : $DEVELOP_BRANCH"
+          echo "Head      : $TRIGGER_BRANCH"
+          echo "═══════════════════════════════════════════════════════════"
+
+  # ═══════════════════════════════════════════════════════════════
+  # JOB 4: Enable auto-merge after approval
+  # ═══════════════════════════════════════════════════════════════
+  enable-auto-merge:
+    name: Enable auto-merge (waits for approval)
+    needs: [detect-iflows, create-pr]
+    if: needs.detect-iflows.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Enable auto-merge with squash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER="${{ needs.create-pr.outputs.pr_number }}"
+
+          echo "═══════════════════════════════════════════════════════════"
+          echo "⚙️  Enabling auto-merge for PR #$PR_NUMBER"
+          echo "═══════════════════════════════════════════════════════════"
+
+          # Enable auto-merge with squash strategy
+          # This ensures only the empty commit reaches develop
+          gh pr merge "$PR_NUMBER" \
+            --auto \
+            --squash \
+            --delete-branch \
+            --subject "🚀 QA Deploy Trigger: ${{ needs.detect-iflows.outputs.iflow_count }} iFlow(s)" \
+            --body "Auto-merged after approval. Empty commit only - no files transferred."
+
+          echo ""
+          echo "✅ Auto-merge enabled"
+          echo ""
+          echo "═══════════════════════════════════════════════════════════"
+          echo "⏳ Waiting for approval..."
+          echo "═══════════════════════════════════════════════════════════"
+          echo ""
+          echo "Once approved:"
+          echo "  1. Empty commit merges to $DEVELOP_BRANCH"
+          echo "  2. deploy-to-qa.yml triggers automatically"
+          echo "  3. iFlows deploy to QA via CTMS"
+          echo ""
+          echo "PR URL: ${{ needs.create-pr.outputs.pr_url }}"
+          echo "═══════════════════════════════════════════════════════════"
+
+  # ═══════════════════════════════════════════════════════════════
+  # JOB 5: No action needed report
+  # ═══════════════════════════════════════════════════════════════
+  no-action:
+    name: Report no action needed
+    needs: detect-iflows
+    if: needs.detect-iflows.outputs.has_changes == 'false'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Report clean state
+        shell: bash
+        run: |
+          echo "::notice title=No PR Needed::No new iFlows on feature branch since last sync with develop"
+          echo "✅ Pipeline status: SUCCESS (no action)"
