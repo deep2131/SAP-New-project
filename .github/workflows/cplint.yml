@@ -1,0 +1,126 @@
+# ============================================================================
+#  CPILint Job — All Prerequisites Wired Together
+#  Mode: local-zip (no tenant credentials required)
+#  Prereqs covered:
+#    1. Java 17          → actions/setup-java
+#    2. CPILint binary   → download + cache
+#    3. cpilint-rules.xml→ verified present before running
+#    4. iFlow zips       → already in btp-iflows/ (from download pipeline)
+# ============================================================================
+
+name: CPILint Gate
+
+on:
+  pull_request:
+    branches: [feature]
+    paths:
+      - 'btp-iflows/**'
+      - 'rulesets/**'
+  workflow_dispatch:
+
+env:
+  CPILINT_VERSION: '1.1.0'
+  JAVA_VERSION:    '17'
+
+jobs:
+  cpilint:
+    name: CPILint
+    runs-on: ubuntu-latest
+    steps:
+
+      # ---------- Prereq 0: Get the repo (ruleset + zips live here) ----------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---------- Prereq 1: Java runtime ----------
+      - name: Set up Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Verify Java
+        run: java -version
+
+      # ---------- Prereq 2: CPILint binary (cached for speed) ----------
+      - name: Cache CPILint ${{ env.CPILINT_VERSION }}
+        id: cache-cpilint
+        uses: actions/cache@v4
+        with:
+          path: cpilint
+          key: cpilint-${{ env.CPILINT_VERSION }}
+
+      - name: Download CPILint ${{ env.CPILINT_VERSION }}
+        if: steps.cache-cpilint.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          curl -L -o cpilint.zip \
+            "https://github.com/mwittrock/cpilint/releases/download/v${CPILINT_VERSION}/cpilint-${CPILINT_VERSION}.zip"
+          unzip -q cpilint.zip -d cpilint-tmp
+          # Flatten so the launcher sits at ./cpilint/bin/cpilint
+          mv cpilint-tmp/cpilint-${CPILINT_VERSION} cpilint
+          rm -rf cpilint-tmp cpilint.zip
+          chmod +x cpilint/bin/cpilint
+
+      - name: Verify CPILint binary
+        run: ./cpilint/bin/cpilint -version
+
+      # ---------- Prereq 3: Ruleset must exist ----------
+      - name: Verify ruleset present
+        run: |
+          if [ ! -f rulesets/cpilint-rules.xml ]; then
+            echo "::error::Missing rulesets/cpilint-rules.xml"
+            exit 1
+          fi
+          echo " Ruleset found."
+
+      # ---------- Prereq 4: iFlow zips must exist ----------
+      - name: Verify iFlow artifacts present
+        id: check-zips
+        run: |
+          shopt -s nullglob
+          zips=(btp-iflows/*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then
+            echo "  No iFlow zips in btp-iflows/ — nothing to lint."
+            echo "has_zips=false" >> "$GITHUB_OUTPUT"
+          else
+            echo " Found ${#zips[@]} iFlow zip(s)."
+            echo "has_zips=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ---------- Run: lint every zip, collect all failures ----------
+      - name: Run CPILint
+        if: steps.check-zips.outputs.has_zips == 'true'
+        shell: bash
+        run: |
+          set +e          # don't stop at first violation — check them all
+          overall=0
+          mkdir -p reports/cpilint
+
+          for zip in btp-iflows/*.zip; do
+            iflow=$(basename "$zip" .zip)
+            echo "::group::CPILint — $iflow"
+            ./cpilint/bin/cpilint \
+              -rules rulesets/cpilint-rules.xml \
+              -files "$zip" \
+              -boring 2>&1 | tee "reports/cpilint/${iflow}.log"
+            rc=${PIPESTATUS[0]}
+            if [ $rc -ne 0 ]; then
+              echo "::error::CPILint violations in $iflow"
+              overall=1
+            else
+              echo " Clean: $iflow"
+            fi
+            echo "::endgroup::"
+          done
+
+          exit $overall
+
+      # ---------- Always upload logs for debugging ----------
+      - name: Upload CPILint logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpilint-reports
+          path: reports/cpilint/
+          retention-days: 14
