@@ -659,4 +659,4 @@ HTML_EOF
           html_body: file://report.html
           from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
           to: ${{ secrets.EMAIL_DISTRIBUTION_LIST }}
-          echo "Report sent"
+         
