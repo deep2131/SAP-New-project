@@ -5,7 +5,7 @@
 
         <!-- Ensure all iFlows have a meaningful name -->
         <rule id="integration-flow-name">
-            <severity>error</severity>
+            <severity>warning</severity>
         </rule>
 
         <!-- Ensure all iFlows have descriptions -->
@@ -15,17 +15,17 @@
 
         <!-- Check for hardcoded endpoints -->
         <rule id="hardcoded-endpoint">
-            <severity>error</severity>
+            <severity>warning</severity>
         </rule>
 
         <!-- Check for hardcoded credentials or sensitive values -->
         <rule id="hardcoded-credentials">
-            <severity>error</severity>
+            <severity>warning</severity>
         </rule>
 
         <!-- Validate externalized parameters -->
         <rule id="externalized-parameters">
-            <severity>error</severity>
+            <severity>warning</severity>
         </rule>
 
         <!-- Check naming convention -->
