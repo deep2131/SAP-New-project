@@ -1,13 +1,3 @@
-# ============================================================================
-#  CPILint Job — All Prerequisites Wired Together
-#  Mode: local-zip (no tenant credentials required)
-#  Prereqs covered:
-#    1. Java 17          → actions/setup-java
-#    2. CPILint binary   → download + cache
-#    3. cpilint-rules.xml→ verified present before running
-#    4. iFlow zips       → already in btp-iflows/ (from download pipeline)
-# ============================================================================
-
 name: CPILint Gate
 
 on:
