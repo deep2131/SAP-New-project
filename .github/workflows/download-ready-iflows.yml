@@ -462,7 +462,7 @@ jobs:
           if-no-files-found: ignore
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 3: Postman (bulletproof exit capture + in-job removal)
+  # JOB 3: Postman (collections from fixed test/ folder)
   # ═══════════════════════════════════════════════════════════════
   run-postman:
     name: Postman collection tests
@@ -512,8 +512,18 @@ jobs:
         run: |
           set -uo pipefail
 
-          COLLECTIONS=$(find "$DOWNLOAD_DIR" -name "*.collection.json")
-          [ -z "$COLLECTIONS" ] && { echo "No Postman collections found."; exit 0; }
+          COLLECTIONS_DIR="$DOWNLOAD_DIR/test"
+
+          # Collections live in the FIXED test/ folder (uploaded manually by developers)
+          COLLECTIONS=$(find "$COLLECTIONS_DIR" -name "*.collection.json" 2>/dev/null || true)
+
+          if [ -z "$COLLECTIONS" ]; then
+            echo "No Postman collections found in $COLLECTIONS_DIR"
+            exit 0
+          fi
+
+          echo "Collections found:"
+          echo "$COLLECTIONS"
 
           TOTAL_FAILED=0
           REMOVED=""
@@ -521,59 +531,57 @@ jobs:
           while IFS= read -r collection; do
             [ -z "$collection" ] && continue
 
-            TESTS_DIR=$(dirname "$collection")
-            VERSION_DIR=$(dirname "$TESTS_DIR")
-            IFLOW_DIR=$(dirname "$VERSION_DIR")
-            FOLDER_IFLOW_ID=$(basename "$IFLOW_DIR")
-            VERSION=$(basename "$VERSION_DIR")
-
+            # iFlow ID is derived from the FILENAME only
             COLLECTION_FILE=$(basename "$collection")
-            FILE_IFLOW_ID="${COLLECTION_FILE%.collection.json}"
+            IFLOW_ID="${COLLECTION_FILE%.collection.json}"
 
             echo "════════════════════════════════════════"
-            echo "Collection: $COLLECTION_FILE | Folder iFlow: $FOLDER_IFLOW_ID"
+            echo "Collection : $COLLECTION_FILE"
+            echo "iFlow ID   : $IFLOW_ID"
+
+            SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
+            IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
+
+            # Match check: was this iFlow actually downloaded?
+            if [ ! -d "$IFLOW_DIR" ]; then
+              echo "SKIP: No matching iFlow folder '$IFLOW_DIR' (not downloaded this run)"
+              continue
+            fi
+
+            echo "MATCH confirmed: testing $IFLOW_ID"
 
             FAILED_THIS=0
 
-            if [ "$FILE_IFLOW_ID" != "$FOLDER_IFLOW_ID" ]; then
-              echo "MISMATCH: '$FILE_IFLOW_ID' does not match iFlow '$FOLDER_IFLOW_ID'"
-              FAILED_THIS=1
+            # Bulletproof exit capture: NO pipe, redirect to file, capture $? directly
+            set +e
+            postman collection run "$collection" \
+              --env-var "baseUrl=$CPI_DEV_ENDPOINT" \
+              > "postman-${SAFE_ID}.log" 2>&1
+            POSTMAN_EXIT=$?
+            set -e
+
+            cat "postman-${SAFE_ID}.log"
+            echo "DEBUG: Postman exit code = $POSTMAN_EXIT"
+
+            if [ "$POSTMAN_EXIT" -eq 0 ]; then
+              echo "PASSED: $IFLOW_ID"
             else
-              echo "MATCH confirmed: testing $FILE_IFLOW_ID"
-
-              ENV_FILE="$TESTS_DIR/environment.json"
-              ENV_ARG=""
-              [ -f "$ENV_FILE" ] && ENV_ARG="--environment $ENV_FILE"
-
-              # Bulletproof: NO pipe, redirect to file, capture $? directly
-              set +e
-              postman collection run "$collection" $ENV_ARG --env-var "baseUrl=$CPI_DEV_ENDPOINT" > "postman-${FOLDER_IFLOW_ID}.log" 2>&1
-              POSTMAN_EXIT=$?
-              set -e
-
-              cat "postman-${FOLDER_IFLOW_ID}.log"
-              echo "DEBUG: Postman exit code = $POSTMAN_EXIT"
-
-              if [ "$POSTMAN_EXIT" -eq 0 ]; then
-                echo "PASSED: $FOLDER_IFLOW_ID"
-              else
-                echo "FAILED: $FOLDER_IFLOW_ID"
-                FAILED_THIS=1
-              fi
+              echo "FAILED: $IFLOW_ID"
+              FAILED_THIS=1
             fi
 
+            # Remove the iFlow folder if its test failed
             if [ "$FAILED_THIS" -eq 1 ]; then
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
-              SAFE_ID=$(echo "$FOLDER_IFLOW_ID" | tr -cd '[:alnum:]_.-')
-              RM_DIR="$DOWNLOAD_DIR/$SAFE_ID"
 
-              echo "DEBUG: Removing dir = $RM_DIR"
-              echo "DEBUG: Exists before? $([ -d "$RM_DIR" ] && echo YES || echo NO)"
+              echo "DEBUG: Removing dir = $IFLOW_DIR"
+              echo "DEBUG: Exists before? $([ -d "$IFLOW_DIR" ] && echo YES || echo NO)"
 
-              if [ -n "$SAFE_ID" ] && [ -d "$RM_DIR" ] && [ "$RM_DIR" != "$DOWNLOAD_DIR" ]; then
-                rm -rf "$RM_DIR"
-                echo "DEBUG: Exists after? $([ -d "$RM_DIR" ] && echo YES || echo NO)"
-                REMOVED="${REMOVED}${FOLDER_IFLOW_ID}; "
+              # SAFETY: never delete the test/ folder or the root
+              if [ -n "$SAFE_ID" ] && [ "$SAFE_ID" != "test" ] && [ -d "$IFLOW_DIR" ] && [ "$IFLOW_DIR" != "$DOWNLOAD_DIR" ]; then
+                rm -rf "$IFLOW_DIR"
+                echo "DEBUG: Exists after? $([ -d "$IFLOW_DIR" ] && echo YES || echo NO)"
+                REMOVED="${REMOVED}${IFLOW_ID}; "
               fi
             fi
           done <<< "$COLLECTIONS"
@@ -582,6 +590,7 @@ jobs:
           echo "DEBUG: TOTAL_FAILED = $TOTAL_FAILED"
           echo "DEBUG: REMOVED = '$REMOVED'"
 
+          # Commit removals if any
           if [ -n "$REMOVED" ]; then
             git add -A "$DOWNLOAD_DIR"
             echo "DEBUG: Staged changes:"
@@ -599,7 +608,7 @@ jobs:
           fi
 
           if [ "$TOTAL_FAILED" -gt 0 ]; then
-            echo "::error title=Postman FAILED::$TOTAL_FAILED iFlow(s) failed/mismatched and were removed. Fix and re-run."
+            echo "::error title=Postman FAILED::$TOTAL_FAILED iFlow(s) failed and were removed. Fix and re-run."
             exit 1
           fi
 
