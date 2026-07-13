@@ -329,7 +329,7 @@ jobs:
           echo "::notice title=Success::All iFlows are already downloaded. Nothing new."
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 2: CPILint (lint + remove failures in-job + exit 1 on fail)
+  # JOB 2: CPILint (bulletproof exit capture + in-job removal)
   # ═══════════════════════════════════════════════════════════════
   run-cpilint:
     name: CPILint static analysis
@@ -361,8 +361,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [ ! -f "$CPILINT_RULES" ] && { echo "::error::$CPILINT_RULES not found"; exit 1; }
-          echo "Rules file found"
+          if [ ! -f "$CPILINT_RULES" ]; then
+            echo "::error::$CPILINT_RULES not found"
+            exit 1
+          fi
+          echo "Rules file found: $CPILINT_RULES"
 
       - name: Install CPILint
         shell: bash
@@ -375,120 +378,80 @@ jobs:
           chmod +x "$CPILINT_BIN"
           echo "CPILINT_BIN=$CPILINT_BIN" >> "$GITHUB_ENV"
 
-      - name: "DEBUG: Show environment"
-        shell: bash
-        run: |
-          echo "════════ ENVIRONMENT DEBUG ════════"
-          echo "Current dir      : $(pwd)"
-          echo "Current branch   : $(git branch --show-current)"
-          echo "Current commit   : $(git rev-parse --short HEAD)"
-          echo "DOWNLOAD_DIR     : $DOWNLOAD_DIR"
-          echo "TARGET_BRANCH    : $TARGET_BRANCH"
-          echo ""
-          echo "════════ FILES IN DOWNLOAD_DIR ════════"
-          find "$DOWNLOAD_DIR" -type f 2>/dev/null || echo "DOWNLOAD_DIR not found!"
-          echo ""
-          echo "════════ ZIP FILES ════════"
-          find "$DOWNLOAD_DIR" -name "*.zip" 2>/dev/null || echo "No ZIPs"
-          echo "═══════════════════════════"
-
-      - name: "DEBUG: Run CPILint and remove failures"
+      - name: Run CPILint and remove failures
         shell: bash
         run: |
           set -uo pipefail
 
           ZIP_FILES=$(find "$DOWNLOAD_DIR" -name "*.zip")
-
-          if [ -z "$ZIP_FILES" ]; then
-            echo "DEBUG: No ZIPs found — nothing to lint. EXITING."
-            exit 0
-          fi
+          [ -z "$ZIP_FILES" ] && { echo "No ZIPs to lint."; exit 0; }
 
           TOTAL_FAILED=0
           REMOVED=""
 
           while IFS= read -r zip; do
             [ -z "$zip" ] && continue
-
             IFLOW_ID=$(basename "$(dirname "$(dirname "$zip")")")
             VERSION=$(basename "$(dirname "$zip")")
 
-            echo ""
             echo "════════════════════════════════════════"
-            echo "DEBUG: Processing zip  = $zip"
-            echo "DEBUG: Derived IFLOW_ID = $IFLOW_ID"
-            echo "DEBUG: Derived VERSION  = $VERSION"
-            echo "════════════════════════════════════════"
+            echo "Linting: $IFLOW_ID v$VERSION"
 
-            "$CPILINT_BIN" -rules "$CPILINT_RULES" -files "$zip" 2>&1 | tee "cpilint-${IFLOW_ID}.log" || true
-            CPILINT_EXIT=${PIPESTATUS[0]}
+            # Bulletproof: NO pipe, redirect to file, capture $? directly
+            set +e
+            "$CPILINT_BIN" -rules "$CPILINT_RULES" -files "$zip" > "cpilint-${IFLOW_ID}.log" 2>&1
+            CPILINT_EXIT=$?
+            set -e
 
+            cat "cpilint-${IFLOW_ID}.log"
             echo "DEBUG: CPILint exit code = $CPILINT_EXIT"
 
             if [ "$CPILINT_EXIT" -ne 0 ]; then
-              echo "DEBUG: >>> FAILURE branch entered for $IFLOW_ID"
+              echo "DEBUG: FAILURE - removing $IFLOW_ID"
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
 
               SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
               IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
 
-              echo "DEBUG: SAFE_ID          = '$SAFE_ID'"
-              echo "DEBUG: IFLOW_DIR        = '$IFLOW_DIR'"
-              echo "DEBUG: Directory exists? $([ -d "$IFLOW_DIR" ] && echo YES || echo NO)"
-              echo "DEBUG: Contents before rm:"
-              ls -la "$IFLOW_DIR" 2>/dev/null || echo "  (cannot list)"
+              echo "DEBUG: Removing dir = $IFLOW_DIR"
+              echo "DEBUG: Exists before? $([ -d "$IFLOW_DIR" ] && echo YES || echo NO)"
 
-              if [ -d "$IFLOW_DIR" ]; then
+              if [ -n "$SAFE_ID" ] && [ -d "$IFLOW_DIR" ] && [ "$IFLOW_DIR" != "$DOWNLOAD_DIR" ]; then
                 rm -rf "$IFLOW_DIR"
-                echo "DEBUG: rm -rf executed"
-                echo "DEBUG: Directory still exists? $([ -d "$IFLOW_DIR" ] && echo YES || echo NO)"
+                echo "DEBUG: Exists after? $([ -d "$IFLOW_DIR" ] && echo YES || echo NO)"
                 REMOVED="${REMOVED}${IFLOW_ID}; "
-              else
-                echo "DEBUG: !!! Directory NOT found — cannot remove"
               fi
             else
-              echo "DEBUG: >>> $IFLOW_ID PASSED (exit 0) — not removing"
+              echo "DEBUG: $IFLOW_ID PASSED"
             fi
           done <<< "$ZIP_FILES"
 
-          echo ""
           echo "════════════════════════════════════════"
           echo "DEBUG: TOTAL_FAILED = $TOTAL_FAILED"
-          echo "DEBUG: REMOVED      = '$REMOVED'"
-          echo "════════════════════════════════════════"
-
-          echo ""
-          echo "════════ GIT STATUS AFTER RM ════════"
-          git status
-          echo "════════════════════════════════════"
+          echo "DEBUG: REMOVED = '$REMOVED'"
 
           if [ -n "$REMOVED" ]; then
-            echo "DEBUG: Staging changes..."
             git add -A "$DOWNLOAD_DIR"
-
-            echo "DEBUG: Staged changes (name-status):"
+            echo "DEBUG: Staged changes:"
             git diff --staged --name-status
 
-            if git diff --staged --quiet; then
-              echo "DEBUG: !!! NOTHING STAGED — git sees no change. Files may be untracked or path wrong."
-            else
-              echo "DEBUG: Committing..."
+            if ! git diff --staged --quiet; then
               git commit -m "Remove CPILint-failed iFlows - run ${{ github.run_id }}"
-              echo "DEBUG: Commit done. Fetching + rebasing..."
               git fetch origin "$TARGET_BRANCH"
               git pull --rebase origin "$TARGET_BRANCH"
-              echo "DEBUG: Pushing to $TARGET_BRANCH..."
               git push origin "$TARGET_BRANCH"
-              echo "DEBUG: >>> PUSH SUCCESSFUL"
+              echo "DEBUG: PUSH SUCCESSFUL"
+            else
+              echo "DEBUG: Nothing staged!"
             fi
-          else
-            echo "DEBUG: REMOVED is empty — no removal attempted"
           fi
 
           if [ "$TOTAL_FAILED" -gt 0 ]; then
-            echo "::error::CPILint failed for $TOTAL_FAILED iFlow(s)"
+            echo "::error title=CPILint FAILED::$TOTAL_FAILED iFlow(s) failed and were removed. Fix in SAP CPI, save new version, and re-run."
             exit 1
           fi
+
+          echo "All iFlows passed CPILint"
 
       - name: Upload CPILint reports
         if: always()
@@ -497,8 +460,9 @@ jobs:
           name: cpilint-reports
           path: cpilint-*.log
           if-no-files-found: ignore
+
   # ═══════════════════════════════════════════════════════════════
-  # JOB 3: Postman (test + remove failures in-job + exit 1 on fail)
+  # JOB 3: Postman (bulletproof exit capture + in-job removal)
   # ═══════════════════════════════════════════════════════════════
   run-postman:
     name: Postman collection tests
@@ -547,13 +511,9 @@ jobs:
           CPI_DEV_ENDPOINT: ${{ secrets.CPI_DEV_ENDPOINT }}
         run: |
           set -uo pipefail
-          echo "Running Postman CLI tests with iFlow matching..."
 
           COLLECTIONS=$(find "$DOWNLOAD_DIR" -name "*.collection.json")
-          if [ -z "$COLLECTIONS" ]; then
-            echo "No Postman collections found - skipping."
-            exit 0
-          fi
+          [ -z "$COLLECTIONS" ] && { echo "No Postman collections found."; exit 0; }
 
           TOTAL_FAILED=0
           REMOVED=""
@@ -570,12 +530,11 @@ jobs:
             COLLECTION_FILE=$(basename "$collection")
             FILE_IFLOW_ID="${COLLECTION_FILE%.collection.json}"
 
-            echo "─────────────────────────────────────────────"
+            echo "════════════════════════════════════════"
             echo "Collection: $COLLECTION_FILE | Folder iFlow: $FOLDER_IFLOW_ID"
 
             FAILED_THIS=0
 
-            # Name matching check
             if [ "$FILE_IFLOW_ID" != "$FOLDER_IFLOW_ID" ]; then
               echo "MISMATCH: '$FILE_IFLOW_ID' does not match iFlow '$FOLDER_IFLOW_ID'"
               FAILED_THIS=1
@@ -586,11 +545,14 @@ jobs:
               ENV_ARG=""
               [ -f "$ENV_FILE" ] && ENV_ARG="--environment $ENV_FILE"
 
-              postman collection run "$collection" \
-                $ENV_ARG \
-                --env-var "baseUrl=$CPI_DEV_ENDPOINT" \
-                2>&1 | tee "postman-${FOLDER_IFLOW_ID}.log" || true
-              POSTMAN_EXIT=${PIPESTATUS[0]}
+              # Bulletproof: NO pipe, redirect to file, capture $? directly
+              set +e
+              postman collection run "$collection" $ENV_ARG --env-var "baseUrl=$CPI_DEV_ENDPOINT" > "postman-${FOLDER_IFLOW_ID}.log" 2>&1
+              POSTMAN_EXIT=$?
+              set -e
+
+              cat "postman-${FOLDER_IFLOW_ID}.log"
+              echo "DEBUG: Postman exit code = $POSTMAN_EXIT"
 
               if [ "$POSTMAN_EXIT" -eq 0 ]; then
                 echo "PASSED: $FOLDER_IFLOW_ID"
@@ -600,32 +562,41 @@ jobs:
               fi
             fi
 
-            # Remove the iFlow if it failed or mismatched
             if [ "$FAILED_THIS" -eq 1 ]; then
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
               SAFE_ID=$(echo "$FOLDER_IFLOW_ID" | tr -cd '[:alnum:]_.-')
               RM_DIR="$DOWNLOAD_DIR/$SAFE_ID"
+
+              echo "DEBUG: Removing dir = $RM_DIR"
+              echo "DEBUG: Exists before? $([ -d "$RM_DIR" ] && echo YES || echo NO)"
+
               if [ -n "$SAFE_ID" ] && [ -d "$RM_DIR" ] && [ "$RM_DIR" != "$DOWNLOAD_DIR" ]; then
                 rm -rf "$RM_DIR"
-                echo "Removed: $RM_DIR"
+                echo "DEBUG: Exists after? $([ -d "$RM_DIR" ] && echo YES || echo NO)"
                 REMOVED="${REMOVED}${FOLDER_IFLOW_ID}; "
               fi
             fi
           done <<< "$COLLECTIONS"
 
-          # Commit removals if any
+          echo "════════════════════════════════════════"
+          echo "DEBUG: TOTAL_FAILED = $TOTAL_FAILED"
+          echo "DEBUG: REMOVED = '$REMOVED'"
+
           if [ -n "$REMOVED" ]; then
             git add -A "$DOWNLOAD_DIR"
+            echo "DEBUG: Staged changes:"
+            git diff --staged --name-status
+
             if ! git diff --staged --quiet; then
               git commit -m "Remove Postman-failed iFlows - run ${{ github.run_id }}"
               git fetch origin "$TARGET_BRANCH"
-              git pull --rebase origin "$TARGET_BRANCH" || git rebase --abort || true
-              git push origin "$TARGET_BRANCH" || echo "::warning::push failed"
+              git pull --rebase origin "$TARGET_BRANCH"
+              git push origin "$TARGET_BRANCH"
+              echo "DEBUG: PUSH SUCCESSFUL"
+            else
+              echo "DEBUG: Nothing staged!"
             fi
-            echo "Removed iFlows: $REMOVED"
           fi
-
-          echo "Total failed: $TOTAL_FAILED"
 
           if [ "$TOTAL_FAILED" -gt 0 ]; then
             echo "::error title=Postman FAILED::$TOTAL_FAILED iFlow(s) failed/mismatched and were removed. Fix and re-run."
@@ -658,7 +629,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Job STATUS is reliably available even for failed jobs
           CP="${{ needs.run-cpilint.result }}"
           PM="${{ needs.run-postman.result }}"
 
