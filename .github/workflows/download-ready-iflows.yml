@@ -440,56 +440,17 @@ jobs:
   # ═══════════════════════════════════════════════════════════════
   # JOB 3: Postman Collection Tests (Official Postman CLI)
   # ═══════════════════════════════════════════════════════════════
-  run-postman:
-    name: Postman collection tests
-    needs: [download-ready-iflows, run-cpilint]
-    if: needs.download-ready-iflows.outputs.skip_download != 'true' && needs.run-cpilint.outputs.result == 'passed'
-    runs-on: ubuntu-latest
-
-    outputs:
-      result: ${{ steps.postman.outputs.result }}
-      passed: ${{ steps.postman.outputs.passed }}
-      failed: ${{ steps.postman.outputs.failed }}
-      details: ${{ steps.postman.outputs.details }}
-
-    steps:
-      - name: Checkout target branch
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TARGET_BRANCH }}
-          fetch-depth: 0
-
-      - name: Install Postman CLI
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Installing official Postman CLI..."
-          curl -o- "https://dl-cli.pstmn.io/install/linux64.sh" | sh
-          echo "Postman CLI: $(postman --version)"
-
-      - name: Login to Postman CLI
-        shell: bash
-        env:
-          POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${POSTMAN_API_KEY:-}" ]; then
-            echo "::warning::POSTMAN_API_KEY not set - running collections in local mode only"
-          else
-            postman login --with-api-key "$POSTMAN_API_KEY"
-            echo "Logged in to Postman CLI"
-          fi
-
-      - name: Run Postman collections
+      - name: Run Postman collections (with iFlow name matching)
         id: postman
         shell: bash
         env:
           CPI_DEV_ENDPOINT: ${{ secrets.CPI_DEV_ENDPOINT }}
         run: |
           set -euo pipefail
-          echo "Running Postman CLI tests..."
+          echo "Running Postman CLI tests with iFlow matching..."
 
-          COLLECTIONS=$(find "$DOWNLOAD_DIR" -path "*/tests/collection.json")
+          # Find all collection files (supports multiple, any *.collection.json)
+          COLLECTIONS=$(find "$DOWNLOAD_DIR" -name "*.collection.json")
           COLL_COUNT=$(echo "$COLLECTIONS" | grep -c . || echo 0)
 
           if [ "$COLL_COUNT" -eq 0 ]; then
@@ -505,39 +466,69 @@ jobs:
 
           TOTAL_PASSED=0
           TOTAL_FAILED=0
+          TOTAL_MISMATCH=0
           DETAILS=""
 
           while IFS= read -r collection; do
             [ -z "$collection" ] && continue
 
-            IFLOW_DIR=$(dirname "$(dirname "$collection")")
-            IFLOW_ID=$(basename "$(dirname "$IFLOW_DIR")")
-            VERSION=$(basename "$IFLOW_DIR")
+            # Derive the iFlow ID from the folder structure
+            # Path: btp-iflows/<IFLOW_ID>/<VERSION>/tests/<file>.collection.json
+            TESTS_DIR=$(dirname "$collection")
+            VERSION_DIR=$(dirname "$TESTS_DIR")
+            IFLOW_DIR=$(dirname "$VERSION_DIR")
+            FOLDER_IFLOW_ID=$(basename "$IFLOW_DIR")
+            VERSION=$(basename "$VERSION_DIR")
 
-            ENV_FILE="$(dirname "$collection")/environment.json"
+            # Extract iFlow ID from the collection FILENAME
+            # e.g., OrderFlow.collection.json -> OrderFlow
+            COLLECTION_FILE=$(basename "$collection")
+            FILE_IFLOW_ID="${COLLECTION_FILE%.collection.json}"
+
+            echo "─────────────────────────────────────────────"
+            echo "Collection file : $COLLECTION_FILE"
+            echo "Folder iFlow ID : $FOLDER_IFLOW_ID"
+            echo "File iFlow ID   : $FILE_IFLOW_ID"
+
+            # ═══ NAME MATCHING CHECK ═══
+            if [ "$FILE_IFLOW_ID" != "$FOLDER_IFLOW_ID" ]; then
+              echo "❌ MISMATCH: Collection '$FILE_IFLOW_ID' does not match iFlow '$FOLDER_IFLOW_ID'"
+              echo "   Expected file name: ${FOLDER_IFLOW_ID}.collection.json"
+              echo "   Skipping this collection - wrong iFlow"
+              TOTAL_MISMATCH=$((TOTAL_MISMATCH + 1))
+              DETAILS="${DETAILS}${FOLDER_IFLOW_ID}|v${VERSION}|MISMATCH"$'\n'
+              continue
+            fi
+
+            echo "MATCH confirmed: testing $FILE_IFLOW_ID"
+
+            # Optional deeper check: verify a matching ZIP exists for this iFlow
+            if ! find "$IFLOW_DIR" -name "${FOLDER_IFLOW_ID}_*.zip" | grep -q .; then
+              echo "WARNING: No matching ZIP found for $FOLDER_IFLOW_ID (continuing anyway)"
+            fi
+
+            ENV_FILE="$TESTS_DIR/environment.json"
             ENV_ARG=""
             [ -f "$ENV_FILE" ] && ENV_ARG="--environment $ENV_FILE"
 
-            echo "─────────────────────────────────────────────"
-            echo "Testing: $IFLOW_ID v$VERSION"
-            echo "─────────────────────────────────────────────"
+            echo "Testing: $FOLDER_IFLOW_ID v$VERSION"
 
-            # Postman CLI runs the local collection.json file directly
             if postman collection run "$collection" \
                 $ENV_ARG \
                 --env-var "baseUrl=$CPI_DEV_ENDPOINT" \
-                2>&1 | tee "postman-${IFLOW_ID}.log"; then
-              echo "PASSED: $IFLOW_ID"
+                2>&1 | tee "postman-${FOLDER_IFLOW_ID}.log"; then
+              echo "PASSED: $FOLDER_IFLOW_ID"
               TOTAL_PASSED=$((TOTAL_PASSED + 1))
-              DETAILS="${DETAILS}${IFLOW_ID}|v${VERSION}|PASS"$'\n'
+              DETAILS="${DETAILS}${FOLDER_IFLOW_ID}|v${VERSION}|PASS"$'\n'
             else
-              echo "FAILED: $IFLOW_ID"
+              echo "FAILED: $FOLDER_IFLOW_ID"
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
-              DETAILS="${DETAILS}${IFLOW_ID}|v${VERSION}|FAIL"$'\n'
+              DETAILS="${DETAILS}${FOLDER_IFLOW_ID}|v${VERSION}|FAIL"$'\n'
             fi
           done <<< "$COLLECTIONS"
 
-          echo "Passed: $TOTAL_PASSED | Failed: $TOTAL_FAILED"
+          echo "─────────────────────────────────────────────"
+          echo "Passed: $TOTAL_PASSED | Failed: $TOTAL_FAILED | Mismatches: $TOTAL_MISMATCH"
           echo "passed=$TOTAL_PASSED" >> "$GITHUB_OUTPUT"
           echo "failed=$TOTAL_FAILED" >> "$GITHUB_OUTPUT"
 
@@ -547,20 +538,15 @@ jobs:
             echo "DETAILS_EOF"
           } >> "$GITHUB_OUTPUT"
 
-          if [ "$TOTAL_FAILED" -gt 0 ]; then
+          # Fail if any test failed OR any mismatch found
+          if [ "$TOTAL_FAILED" -gt 0 ] || [ "$TOTAL_MISMATCH" -gt 0 ]; then
             echo "result=failed" >> "$GITHUB_OUTPUT"
-            echo "::error::Postman: $TOTAL_FAILED collection(s) failed"
+            [ "$TOTAL_MISMATCH" -gt 0 ] && echo "::error::$TOTAL_MISMATCH collection(s) had name mismatches"
+            [ "$TOTAL_FAILED" -gt 0 ] && echo "::error::$TOTAL_FAILED collection(s) failed tests"
             exit 1
           fi
-          echo "result=passed" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Postman reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: postman-reports
-          path: postman-*.log
-          if-no-files-found: ignore
+          echo "result=passed" >> "$GITHUB_OUTPUT"
   # ═══════════════════════════════════════════════════════════════
   # JOB 4: Send Quality Gate Report Email
   # ═══════════════════════════════════════════════════════════════
@@ -605,10 +591,15 @@ jobs:
           # Postman rows
           PM_ROWS=""
           while IFS='|' read -r id ver status; do
-            [ -z "$id" ] && continue
-            COLOR=$([ "$status" = "PASS" ] && echo "#107c10" || echo "#d13438")
-            PM_ROWS="${PM_ROWS}<tr><td style='padding:8px;border:1px solid #ddd;'>${id}</td><td style='padding:8px;border:1px solid #ddd;'>${ver}</td><td style='padding:8px;border:1px solid #ddd;color:${COLOR};font-weight:bold;'>${status}</td></tr>"
-          done <<< "${{ needs.run-postman.outputs.details }}"
+             [ -z "$id" ] && continue
+             case "$status" in
+               PASS)     COLOR="#107c10" ;;
+               FAIL)     COLOR="#d13438" ;;
+               MISMATCH) COLOR="#f59e0b" ;;   # amber for mismatch
+              *)         COLOR="#666" ;;
+              esac
+              PM_ROWS="${PM_ROWS}<tr><td>${id}</td><td>${ver}</td><td style='color:${COLOR};font-weight:bold;'>${status}</td></tr>"
+              done <<< "${{ needs.run-postman.outputs.details }}"
 
           cat > report.html << HTML_EOF
 <!DOCTYPE html>
@@ -646,8 +637,8 @@ jobs:
 </body></html>
 HTML_EOF
 
-          echo "Report prepared"
-
+      echo "Report prepared"
+      
       - name: Send email report
         uses: dawidd6/action-send-mail@v3
         with:
@@ -659,4 +650,6 @@ HTML_EOF
           html_body: file://report.html
           from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
           to: ${{ secrets.EMAIL_DISTRIBUTION_LIST }}
-         
+
+          from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
+          to: ${{ secrets.EMAIL_DISTRIBUTION_LIST }}
