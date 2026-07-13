@@ -1,116 +1,219 @@
-name: CPILint Gate
+name: CPILint Quality Gate
 
 on:
-  pull_request:
-    branches: [feature]
-    paths:
-      - 'btp-iflows/**'
-      - 'rulesets/**'
+  workflow_run:
+    workflows: ["Download ReadyForDeployment iFlows from SAP BTP"]
+    types:
+      - completed
+
   workflow_dispatch:
+    inputs:
+      reason:
+        description: "Manual CPILint run reason"
+        required: false
+        default: "Manual quality check"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpilint-check-feature
+  cancel-in-progress: false
 
 env:
-  CPILINT_VERSION: '1.1.0'
-  JAVA_VERSION:    '17'
+  FEATURE_BRANCH: feature
+  DOWNLOAD_DIR: btp-iflows
+  CPILINT_RULES: cpilint-rules.xml
+  CPILINT_VERSION: "1.1.0"
 
 jobs:
-  cpilint:
-    name: CPILint
+  # JOB 1: Verify the download workflow succeeded
+  verify-trigger:
+    name: Verify download succeeded
     runs-on: ubuntu-latest
+
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+
     steps:
+      - name: Verify trigger context
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      # ---------- Prereq 0: Get the repo (ruleset + zips live here) ----------
-      - name: Checkout
+          echo "Verifying trigger"
+          echo "Event : ${{ github.event_name }}"
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            SOURCE_BRANCH="${{ github.event.workflow_run.head_branch }}"
+            CONCLUSION="${{ github.event.workflow_run.conclusion }}"
+
+            echo "Source branch    : $SOURCE_BRANCH"
+            echo "Source conclusion: $CONCLUSION"
+
+            # Only proceed if download ran on feature branch AND succeeded
+            if [ "$SOURCE_BRANCH" != "$FEATURE_BRANCH" ]; then
+              echo "::notice::Download ran on '$SOURCE_BRANCH', not '$FEATURE_BRANCH'. Skipping."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "Download succeeded on $FEATURE_BRANCH"
+          else
+            echo "Manual trigger"
+          fi
+
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+  # JOB 2: Run CPILint against downloaded iFlows
+  run-cpilint:
+    name: Run CPILint static analysis
+    needs: verify-trigger
+    if: needs.verify-trigger.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout feature branch
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FEATURE_BRANCH }}
+          fetch-depth: 0
 
-      # ---------- Prereq 1: Java runtime ----------
-      - name: Set up Java ${{ env.JAVA_VERSION }}
+      - name: Setup Java (required for CPILint)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: ${{ env.JAVA_VERSION }}
+          java-version: '17'
 
-      - name: Verify Java
-        run: java -version
-
-      # ---------- Prereq 2: CPILint binary (cached for speed) ----------
-      - name: Cache CPILint ${{ env.CPILINT_VERSION }}
-        id: cache-cpilint
-        uses: actions/cache@v4
-        with:
-          path: cpilint
-          key: cpilint-${{ env.CPILINT_VERSION }}
-
-      - name: Download CPILint ${{ env.CPILINT_VERSION }}
-        if: steps.cache-cpilint.outputs.cache-hit != 'true'
-        run: |
-          set -e
-          curl -L -o cpilint.zip \
-            "https://github.com/mwittrock/cpilint/releases/download/v${CPILINT_VERSION}/cpilint-${CPILINT_VERSION}.zip"
-          unzip -q cpilint.zip -d cpilint-tmp
-          # Flatten so the launcher sits at ./cpilint/bin/cpilint
-          mv cpilint-tmp/cpilint-${CPILINT_VERSION} cpilint
-          rm -rf cpilint-tmp cpilint.zip
-          chmod +x cpilint/bin/cpilint
-
-      - name: Verify CPILint binary
-        run: ./cpilint/bin/cpilint -version
-
-      # ---------- Prereq 3: Ruleset must exist ----------
-      - name: Verify ruleset present
-        run: |
-          if [ ! -f rulesets/cpilint-rules.xml ]; then
-            echo "::error::Missing rulesets/cpilint-rules.xml"
-            exit 1
-          fi
-          echo " Ruleset found."
-
-      # ---------- Prereq 4: iFlow zips must exist ----------
-      - name: Verify iFlow artifacts present
-        id: check-zips
-        run: |
-          shopt -s nullglob
-          zips=(btp-iflows/*.zip)
-          if [ ${#zips[@]} -eq 0 ]; then
-            echo "  No iFlow zips in btp-iflows/ — nothing to lint."
-            echo "has_zips=false" >> "$GITHUB_OUTPUT"
-          else
-            echo " Found ${#zips[@]} iFlow zip(s)."
-            echo "has_zips=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      # ---------- Run: lint every zip, collect all failures ----------
-      - name: Run CPILint
-        if: steps.check-zips.outputs.has_zips == 'true'
+      - name: Verify CPILint rules file exists
         shell: bash
         run: |
-          set +e          # don't stop at first violation — check them all
-          overall=0
-          mkdir -p reports/cpilint
+          set -euo pipefail
 
-          for zip in btp-iflows/*.zip; do
-            iflow=$(basename "$zip" .zip)
-            echo "::group::CPILint — $iflow"
-            ./cpilint/bin/cpilint \
-              -rules rulesets/cpilint-rules.xml \
-              -files "$zip" \
-              -boring 2>&1 | tee "reports/cpilint/${iflow}.log"
-            rc=${PIPESTATUS[0]}
-            if [ $rc -ne 0 ]; then
-              echo "::error::CPILint violations in $iflow"
-              overall=1
+          if [ ! -f "$CPILINT_RULES" ]; then
+            echo "::error title=Missing rules::$CPILINT_RULES not found in repo"
+            exit 1
+          fi
+
+          echo "Rules file found: $CPILINT_RULES"
+          echo ""
+          echo "Rules configured:"
+          grep -oE '<[a-z-]+' "$CPILINT_RULES" | grep -vE '<(cpilint|rules|imports|exemptions|allow|disallow)' | sed 's/</  - /' || true
+
+      - name: Download and install CPILint
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo " Downloading CPILint v$CPILINT_VERSION..."
+
+          CPILINT_URL="https://github.com/mwittrock/cpilint/releases/download/v${CPILINT_VERSION}/cpilint-${CPILINT_VERSION}.zip"
+
+          curl -sSL -o cpilint.zip "$CPILINT_URL"
+
+          if [ ! -s cpilint.zip ]; then
+            echo "::error title=Download failed::Could not download CPILint"
+            exit 1
+          fi
+
+          unzip -q cpilint.zip -d cpilint-tool
+
+          # Locate the cpilint executable
+          CPILINT_BIN=$(find cpilint-tool -name "cpilint" -type f | head -1)
+          chmod +x "$CPILINT_BIN"
+
+          echo "CPILINT_BIN=$CPILINT_BIN" >> "$GITHUB_ENV"
+          echo "CPILint installed: $CPILINT_BIN"
+
+      - name: Run CPILint on all downloaded iFlows
+        id: lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Running CPILint quality gate"
+
+          if [ ! -d "$DOWNLOAD_DIR" ]; then
+            echo "::notice::No $DOWNLOAD_DIR directory found. Nothing to lint."
+            echo "result=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Collect all iFlow ZIPs
+          ZIP_FILES=$(find "$DOWNLOAD_DIR" -name "*.zip")
+          ZIP_COUNT=$(echo "$ZIP_FILES" | grep -c . || echo 0)
+
+          if [ "$ZIP_COUNT" -eq 0 ]; then
+            echo "::notice::No iFlow ZIPs found to lint"
+            echo "result=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "iFlows to lint: $ZIP_COUNT"
+          echo ""
+
+          TOTAL_PASSED=0
+          TOTAL_FAILED=0
+          FAILED_IFLOWS=""
+
+          while IFS= read -r zip; do
+            [ -z "$zip" ] && continue
+
+            IFLOW_ID=$(basename "$(dirname "$(dirname "$zip")")")
+            VERSION=$(basename "$(dirname "$zip")")
+            
+            echo "Linting: $IFLOW_ID | v$VERSION"
+
+            # Run CPILint against the iFlow ZIP
+            if "$CPILINT_BIN" -rules "$CPILINT_RULES" -files "$zip" 2>&1 | tee "cpilint-${IFLOW_ID}.log"; then
+              echo "PASSED: $IFLOW_ID"
+              TOTAL_PASSED=$((TOTAL_PASSED + 1))
             else
-              echo " Clean: $iflow"
+              echo "FAILED: $IFLOW_ID"
+              TOTAL_FAILED=$((TOTAL_FAILED + 1))
+              FAILED_IFLOWS="${FAILED_IFLOWS}${FAILED_IFLOWS:+, }${IFLOW_ID} v${VERSION}"
             fi
-            echo "::endgroup::"
-          done
+            echo ""
+          done <<< "$ZIP_FILES"
 
-          exit $overall
+          echo "CPILint Summary"
 
-      # ---------- Always upload logs for debugging ----------
-      - name: Upload CPILint logs
+          echo " Passed : $TOTAL_PASSED"
+          echo " Failed : $TOTAL_FAILED"
+
+          echo "passed=$TOTAL_PASSED" >> "$GITHUB_OUTPUT"
+          echo "failed=$TOTAL_FAILED" >> "$GITHUB_OUTPUT"
+
+          if [ "$TOTAL_FAILED" -gt 0 ]; then
+            echo "failed_iflows=$FAILED_IFLOWS" >> "$GITHUB_OUTPUT"
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+            echo "::error title=CPILint Failed::$TOTAL_FAILED iFlow(s) violated rules: $FAILED_IFLOWS"
+            exit 1
+          fi
+
+          echo "result=passed" >> "$GITHUB_OUTPUT"
+          echo "All iFlows passed CPILint checks"
+
+      - name: Upload CPILint reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cpilint-reports
-          path: reports/cpilint/
-          retention-days: 14
+          path: cpilint-*.log
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Report result
+        if: always()
+        shell: bash
+        run: |
+          RESULT="${{ steps.lint.outputs.result }}"
+          case "$RESULT" in
+            passed)  echo "::notice title=CPILint Passed::All iFlows compliant. Ready for next gate (Postman)." ;;
+            failed)  echo "::error title=CPILint Failed::Fix rule violations before proceeding" ;;
+            skipped) echo "::notice title=CPILint Skipped::No iFlows to check" ;;
+          esac
