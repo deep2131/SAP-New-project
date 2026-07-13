@@ -361,11 +361,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "$CPILINT_RULES" ]; then
-            echo "::error::$CPILINT_RULES not found"
-            exit 1
-          fi
-          echo "Rules file found: $CPILINT_RULES"
+          [ ! -f "$CPILINT_RULES" ] && { echo "::error::$CPILINT_RULES not found"; exit 1; }
+          echo "Rules file found"
 
       - name: Install CPILint
         shell: bash
@@ -378,15 +375,32 @@ jobs:
           chmod +x "$CPILINT_BIN"
           echo "CPILINT_BIN=$CPILINT_BIN" >> "$GITHUB_ENV"
 
-      - name: Run CPILint and remove failures
+      - name: "DEBUG: Show environment"
+        shell: bash
+        run: |
+          echo "════════ ENVIRONMENT DEBUG ════════"
+          echo "Current dir      : $(pwd)"
+          echo "Current branch   : $(git branch --show-current)"
+          echo "Current commit   : $(git rev-parse --short HEAD)"
+          echo "DOWNLOAD_DIR     : $DOWNLOAD_DIR"
+          echo "TARGET_BRANCH    : $TARGET_BRANCH"
+          echo ""
+          echo "════════ FILES IN DOWNLOAD_DIR ════════"
+          find "$DOWNLOAD_DIR" -type f 2>/dev/null || echo "DOWNLOAD_DIR not found!"
+          echo ""
+          echo "════════ ZIP FILES ════════"
+          find "$DOWNLOAD_DIR" -name "*.zip" 2>/dev/null || echo "No ZIPs"
+          echo "═══════════════════════════"
+
+      - name: "DEBUG: Run CPILint and remove failures"
         shell: bash
         run: |
           set -uo pipefail
-          echo "Running CPILint quality gate..."
 
           ZIP_FILES=$(find "$DOWNLOAD_DIR" -name "*.zip")
+
           if [ -z "$ZIP_FILES" ]; then
-            echo "No iFlows to lint."
+            echo "DEBUG: No ZIPs found — nothing to lint. EXITING."
             exit 0
           fi
 
@@ -395,52 +409,86 @@ jobs:
 
           while IFS= read -r zip; do
             [ -z "$zip" ] && continue
+
             IFLOW_ID=$(basename "$(dirname "$(dirname "$zip")")")
             VERSION=$(basename "$(dirname "$zip")")
 
-            echo "─────────────────────────────────────────────"
-            echo "Linting: $IFLOW_ID v$VERSION"
+            echo ""
+            echo "════════════════════════════════════════"
+            echo "DEBUG: Processing zip  = $zip"
+            echo "DEBUG: Derived IFLOW_ID = $IFLOW_ID"
+            echo "DEBUG: Derived VERSION  = $VERSION"
+            echo "════════════════════════════════════════"
 
             "$CPILINT_BIN" -rules "$CPILINT_RULES" -files "$zip" 2>&1 | tee "cpilint-${IFLOW_ID}.log"
             CPILINT_EXIT=${PIPESTATUS[0]}
 
-            if [ "$CPILINT_EXIT" -eq 0 ]; then
-              echo "PASSED: $IFLOW_ID"
-            else
-              echo "FAILED: $IFLOW_ID - removing from repository"
+            echo "DEBUG: CPILint exit code = $CPILINT_EXIT"
+
+            if [ "$CPILINT_EXIT" -ne 0 ]; then
+              echo "DEBUG: >>> FAILURE branch entered for $IFLOW_ID"
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
 
               SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
               IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
 
-              if [ -n "$SAFE_ID" ] && [ -d "$IFLOW_DIR" ] && [ "$IFLOW_DIR" != "$DOWNLOAD_DIR" ]; then
+              echo "DEBUG: SAFE_ID          = '$SAFE_ID'"
+              echo "DEBUG: IFLOW_DIR        = '$IFLOW_DIR'"
+              echo "DEBUG: Directory exists? $([ -d "$IFLOW_DIR" ] && echo YES || echo NO)"
+              echo "DEBUG: Contents before rm:"
+              ls -la "$IFLOW_DIR" 2>/dev/null || echo "  (cannot list)"
+
+              if [ -d "$IFLOW_DIR" ]; then
                 rm -rf "$IFLOW_DIR"
-                echo "Removed: $IFLOW_DIR"
+                echo "DEBUG: rm -rf executed"
+                echo "DEBUG: Directory still exists? $([ -d "$IFLOW_DIR" ] && echo YES || echo NO)"
                 REMOVED="${REMOVED}${IFLOW_ID}; "
+              else
+                echo "DEBUG: !!! Directory NOT found — cannot remove"
               fi
+            else
+              echo "DEBUG: >>> $IFLOW_ID PASSED (exit 0) — not removing"
             fi
           done <<< "$ZIP_FILES"
 
-          # Commit removals if any
-          if [ -n "$REMOVED" ]; then
-            git add -A "$DOWNLOAD_DIR"
-            if ! git diff --staged --quiet; then
-              git commit -m "Remove CPILint-failed iFlows - run ${{ github.run_id }}"
-              git fetch origin "$TARGET_BRANCH"
-              git pull --rebase origin "$TARGET_BRANCH" || git rebase --abort || true
-              git push origin "$TARGET_BRANCH" || echo "::warning::push failed"
-            fi
-            echo "Removed iFlows: $REMOVED"
-          fi
+          echo ""
+          echo "════════════════════════════════════════"
+          echo "DEBUG: TOTAL_FAILED = $TOTAL_FAILED"
+          echo "DEBUG: REMOVED      = '$REMOVED'"
+          echo "════════════════════════════════════════"
 
-          echo "Total failed: $TOTAL_FAILED"
+          echo ""
+          echo "════════ GIT STATUS AFTER RM ════════"
+          git status
+          echo "════════════════════════════════════"
+
+          if [ -n "$REMOVED" ]; then
+            echo "DEBUG: Staging changes..."
+            git add -A "$DOWNLOAD_DIR"
+
+            echo "DEBUG: Staged changes (name-status):"
+            git diff --staged --name-status
+
+            if git diff --staged --quiet; then
+              echo "DEBUG: !!! NOTHING STAGED — git sees no change. Files may be untracked or path wrong."
+            else
+              echo "DEBUG: Committing..."
+              git commit -m "Remove CPILint-failed iFlows - run ${{ github.run_id }}"
+              echo "DEBUG: Commit done. Fetching + rebasing..."
+              git fetch origin "$TARGET_BRANCH"
+              git pull --rebase origin "$TARGET_BRANCH"
+              echo "DEBUG: Pushing to $TARGET_BRANCH..."
+              git push origin "$TARGET_BRANCH"
+              echo "DEBUG: >>> PUSH SUCCESSFUL"
+            fi
+          else
+            echo "DEBUG: REMOVED is empty — no removal attempted"
+          fi
 
           if [ "$TOTAL_FAILED" -gt 0 ]; then
-            echo "::error title=CPILint FAILED::$TOTAL_FAILED iFlow(s) failed and were removed. Fix in SAP CPI, save new version, and re-run."
+            echo "::error::CPILint failed for $TOTAL_FAILED iFlow(s)"
             exit 1
           fi
-
-          echo "All iFlows passed CPILint"
 
       - name: Upload CPILint reports
         if: always()
@@ -449,7 +497,6 @@ jobs:
           name: cpilint-reports
           path: cpilint-*.log
           if-no-files-found: ignore
-
   # ═══════════════════════════════════════════════════════════════
   # JOB 3: Postman (test + remove failures in-job + exit 1 on fail)
   # ═══════════════════════════════════════════════════════════════
