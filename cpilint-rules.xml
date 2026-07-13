@@ -1,43 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <cpilint>
+  <rules>
 
-    <rules>
+    <!-- iFlow must have a description (maps to your "description" rule) -->
+    <iflow-description-required />
 
-        <!-- Ensure all iFlows have a meaningful name -->
-        <rule id="integration-flow-name">
-            <severity>warning</severity>
-        </rule>
 
-        <!-- Ensure all iFlows have descriptions -->
-        <rule id="integration-flow-description">
-            <severity>warning</severity>
-        </rule>
-
-        <!-- Check for hardcoded endpoints -->
-        <rule id="hardcoded-endpoint">
-            <severity>warning</severity>
-        </rule>
-
-        <!-- Check for hardcoded credentials or sensitive values -->
-        <rule id="hardcoded-credentials">
-            <severity>warning</severity>
-        </rule>
-
-        <!-- Validate externalized parameters -->
-        <rule id="externalized-parameters">
-            <severity>warning</severity>
-        </rule>
-
-        <!-- Check naming convention -->
-        <rule id="naming-convention">
-            <severity>warning</severity>
-        </rule>
-
-        <!-- Check exception subprocess availability -->
-        <rule id="exception-subprocess">
-            <severity>warning</severity>
-        </rule>
-
-    </rules>
-
+  </rules>
 </cpilint>
