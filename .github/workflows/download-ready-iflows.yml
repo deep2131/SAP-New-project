@@ -329,7 +329,7 @@ jobs:
           echo "::notice title=Success::All iFlows are already downloaded. Nothing new."
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 2: CPILint Quality Gate (no exit 1 - reports via output)
+  # JOB 2: CPILint (lint + remove failures in-job + exit 1 on fail)
   # ═══════════════════════════════════════════════════════════════
   run-cpilint:
     name: CPILint static analysis
@@ -337,18 +337,19 @@ jobs:
     if: needs.download-ready-iflows.outputs.skip_download != 'true'
     runs-on: ubuntu-latest
 
-    outputs:
-      result: ${{ steps.lint.outputs.result }}
-      passed: ${{ steps.lint.outputs.passed }}
-      failed: ${{ steps.lint.outputs.failed }}
-      details: ${{ steps.lint.outputs.details }}
-
     steps:
       - name: Checkout target branch
         uses: actions/checkout@v4
         with:
           ref: ${{ env.TARGET_BRANCH }}
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -377,64 +378,69 @@ jobs:
           chmod +x "$CPILINT_BIN"
           echo "CPILINT_BIN=$CPILINT_BIN" >> "$GITHUB_ENV"
 
-      - name: Run CPILint
-        id: lint
+      - name: Run CPILint and remove failures
         shell: bash
         run: |
           set -uo pipefail
           echo "Running CPILint quality gate..."
 
           ZIP_FILES=$(find "$DOWNLOAD_DIR" -name "*.zip")
-          ZIP_COUNT=$(echo "$ZIP_FILES" | grep -c . || echo 0)
-
-          if [ "$ZIP_COUNT" -eq 0 ]; then
-            echo "result=passed" >> "$GITHUB_OUTPUT"
-            echo "passed=0" >> "$GITHUB_OUTPUT"
-            echo "failed=0" >> "$GITHUB_OUTPUT"
-            echo "details=" >> "$GITHUB_OUTPUT"
+          if [ -z "$ZIP_FILES" ]; then
+            echo "No iFlows to lint."
             exit 0
           fi
 
-          TOTAL_PASSED=0
           TOTAL_FAILED=0
-          DETAILS=""
+          REMOVED=""
 
           while IFS= read -r zip; do
             [ -z "$zip" ] && continue
             IFLOW_ID=$(basename "$(dirname "$(dirname "$zip")")")
             VERSION=$(basename "$(dirname "$zip")")
 
+            echo "─────────────────────────────────────────────"
             echo "Linting: $IFLOW_ID v$VERSION"
+
             "$CPILINT_BIN" -rules "$CPILINT_RULES" -files "$zip" 2>&1 | tee "cpilint-${IFLOW_ID}.log"
             CPILINT_EXIT=${PIPESTATUS[0]}
 
             if [ "$CPILINT_EXIT" -eq 0 ]; then
               echo "PASSED: $IFLOW_ID"
-              TOTAL_PASSED=$((TOTAL_PASSED + 1))
-              DETAILS="${DETAILS}${IFLOW_ID}|v${VERSION}|PASS"$'\n'
             else
-              echo "FAILED: $IFLOW_ID"
+              echo "FAILED: $IFLOW_ID - removing from repository"
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
-              DETAILS="${DETAILS}${IFLOW_ID}|v${VERSION}|FAIL"$'\n'
+
+              SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
+              IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
+
+              if [ -n "$SAFE_ID" ] && [ -d "$IFLOW_DIR" ] && [ "$IFLOW_DIR" != "$DOWNLOAD_DIR" ]; then
+                rm -rf "$IFLOW_DIR"
+                echo "Removed: $IFLOW_DIR"
+                REMOVED="${REMOVED}${IFLOW_ID}; "
+              fi
             fi
           done <<< "$ZIP_FILES"
 
-          echo "Passed: $TOTAL_PASSED | Failed: $TOTAL_FAILED"
-          echo "passed=$TOTAL_PASSED" >> "$GITHUB_OUTPUT"
-          echo "failed=$TOTAL_FAILED" >> "$GITHUB_OUTPUT"
+          # Commit removals if any
+          if [ -n "$REMOVED" ]; then
+            git add -A "$DOWNLOAD_DIR"
+            if ! git diff --staged --quiet; then
+              git commit -m "Remove CPILint-failed iFlows - run ${{ github.run_id }}"
+              git fetch origin "$TARGET_BRANCH"
+              git pull --rebase origin "$TARGET_BRANCH" || git rebase --abort || true
+              git push origin "$TARGET_BRANCH" || echo "::warning::push failed"
+            fi
+            echo "Removed iFlows: $REMOVED"
+          fi
 
-          {
-            echo "details<<DETAILS_EOF"
-            echo "$DETAILS"
-            echo "DETAILS_EOF"
-          } >> "$GITHUB_OUTPUT"
+          echo "Total failed: $TOTAL_FAILED"
 
           if [ "$TOTAL_FAILED" -gt 0 ]; then
-            echo "result=failed" >> "$GITHUB_OUTPUT"
-            echo "::warning::CPILint: $TOTAL_FAILED iFlow(s) failed"
-          else
-            echo "result=passed" >> "$GITHUB_OUTPUT"
+            echo "::error title=CPILint FAILED::$TOTAL_FAILED iFlow(s) failed and were removed. Fix in SAP CPI, save new version, and re-run."
+            exit 1
           fi
+
+          echo "All iFlows passed CPILint"
 
       - name: Upload CPILint reports
         if: always()
@@ -445,19 +451,13 @@ jobs:
           if-no-files-found: ignore
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 3: Postman Collection Tests (no exit 1 - reports via output)
+  # JOB 3: Postman (test + remove failures in-job + exit 1 on fail)
   # ═══════════════════════════════════════════════════════════════
   run-postman:
     name: Postman collection tests
     needs: [download-ready-iflows, run-cpilint]
-    if: needs.download-ready-iflows.outputs.skip_download != 'true' && needs.run-cpilint.outputs.result == 'passed'
+    if: needs.download-ready-iflows.outputs.skip_download != 'true'
     runs-on: ubuntu-latest
-
-    outputs:
-      result: ${{ steps.postman.outputs.result }}
-      passed: ${{ steps.postman.outputs.passed }}
-      failed: ${{ steps.postman.outputs.failed }}
-      details: ${{ steps.postman.outputs.details }}
 
     steps:
       - name: Checkout target branch
@@ -465,6 +465,13 @@ jobs:
         with:
           ref: ${{ env.TARGET_BRANCH }}
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Install Postman CLI
         shell: bash
@@ -487,8 +494,7 @@ jobs:
             echo "Logged in to Postman CLI"
           fi
 
-      - name: Run Postman collections (with iFlow name matching)
-        id: postman
+      - name: Run Postman and remove failures
         shell: bash
         env:
           CPI_DEV_ENDPOINT: ${{ secrets.CPI_DEV_ENDPOINT }}
@@ -497,23 +503,13 @@ jobs:
           echo "Running Postman CLI tests with iFlow matching..."
 
           COLLECTIONS=$(find "$DOWNLOAD_DIR" -name "*.collection.json")
-          COLL_COUNT=$(echo "$COLLECTIONS" | grep -c . || echo 0)
-
-          if [ "$COLL_COUNT" -eq 0 ]; then
-            echo "::notice::No Postman collections found"
-            echo "result=passed" >> "$GITHUB_OUTPUT"
-            echo "passed=0" >> "$GITHUB_OUTPUT"
-            echo "failed=0" >> "$GITHUB_OUTPUT"
-            echo "details=" >> "$GITHUB_OUTPUT"
+          if [ -z "$COLLECTIONS" ]; then
+            echo "No Postman collections found - skipping."
             exit 0
           fi
 
-          echo "Collections found: $COLL_COUNT"
-
-          TOTAL_PASSED=0
           TOTAL_FAILED=0
-          TOTAL_MISMATCH=0
-          DETAILS=""
+          REMOVED=""
 
           while IFS= read -r collection; do
             [ -z "$collection" ] && continue
@@ -528,57 +524,68 @@ jobs:
             FILE_IFLOW_ID="${COLLECTION_FILE%.collection.json}"
 
             echo "─────────────────────────────────────────────"
-            echo "Collection file : $COLLECTION_FILE"
-            echo "Folder iFlow ID : $FOLDER_IFLOW_ID"
-            echo "File iFlow ID   : $FILE_IFLOW_ID"
+            echo "Collection: $COLLECTION_FILE | Folder iFlow: $FOLDER_IFLOW_ID"
 
+            FAILED_THIS=0
+
+            # Name matching check
             if [ "$FILE_IFLOW_ID" != "$FOLDER_IFLOW_ID" ]; then
-              echo "MISMATCH: Collection '$FILE_IFLOW_ID' does not match iFlow '$FOLDER_IFLOW_ID'"
-              TOTAL_MISMATCH=$((TOTAL_MISMATCH + 1))
-              DETAILS="${DETAILS}${FOLDER_IFLOW_ID}|v${VERSION}|MISMATCH"$'\n'
-              continue
+              echo "MISMATCH: '$FILE_IFLOW_ID' does not match iFlow '$FOLDER_IFLOW_ID'"
+              FAILED_THIS=1
+            else
+              echo "MATCH confirmed: testing $FILE_IFLOW_ID"
+
+              ENV_FILE="$TESTS_DIR/environment.json"
+              ENV_ARG=""
+              [ -f "$ENV_FILE" ] && ENV_ARG="--environment $ENV_FILE"
+
+              postman collection run "$collection" \
+                $ENV_ARG \
+                --env-var "baseUrl=$CPI_DEV_ENDPOINT" \
+                2>&1 | tee "postman-${FOLDER_IFLOW_ID}.log"
+              POSTMAN_EXIT=${PIPESTATUS[0]}
+
+              if [ "$POSTMAN_EXIT" -eq 0 ]; then
+                echo "PASSED: $FOLDER_IFLOW_ID"
+              else
+                echo "FAILED: $FOLDER_IFLOW_ID"
+                FAILED_THIS=1
+              fi
             fi
 
-            echo "MATCH confirmed: testing $FILE_IFLOW_ID"
-
-            ENV_FILE="$TESTS_DIR/environment.json"
-            ENV_ARG=""
-            [ -f "$ENV_FILE" ] && ENV_ARG="--environment $ENV_FILE"
-
-            postman collection run "$collection" \
-              $ENV_ARG \
-              --env-var "baseUrl=$CPI_DEV_ENDPOINT" \
-              2>&1 | tee "postman-${FOLDER_IFLOW_ID}.log"
-            POSTMAN_EXIT=${PIPESTATUS[0]}
-
-            if [ "$POSTMAN_EXIT" -eq 0 ]; then
-              echo "PASSED: $FOLDER_IFLOW_ID"
-              TOTAL_PASSED=$((TOTAL_PASSED + 1))
-              DETAILS="${DETAILS}${FOLDER_IFLOW_ID}|v${VERSION}|PASS"$'\n'
-            else
-              echo "FAILED: $FOLDER_IFLOW_ID"
+            # Remove the iFlow if it failed or mismatched
+            if [ "$FAILED_THIS" -eq 1 ]; then
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
-              DETAILS="${DETAILS}${FOLDER_IFLOW_ID}|v${VERSION}|FAIL"$'\n'
+              SAFE_ID=$(echo "$FOLDER_IFLOW_ID" | tr -cd '[:alnum:]_.-')
+              RM_DIR="$DOWNLOAD_DIR/$SAFE_ID"
+              if [ -n "$SAFE_ID" ] && [ -d "$RM_DIR" ] && [ "$RM_DIR" != "$DOWNLOAD_DIR" ]; then
+                rm -rf "$RM_DIR"
+                echo "Removed: $RM_DIR"
+                REMOVED="${REMOVED}${FOLDER_IFLOW_ID}; "
+              fi
             fi
           done <<< "$COLLECTIONS"
 
-          echo "─────────────────────────────────────────────"
-          echo "Passed: $TOTAL_PASSED | Failed: $TOTAL_FAILED | Mismatches: $TOTAL_MISMATCH"
-          echo "passed=$TOTAL_PASSED" >> "$GITHUB_OUTPUT"
-          echo "failed=$TOTAL_FAILED" >> "$GITHUB_OUTPUT"
-
-          {
-            echo "details<<DETAILS_EOF"
-            echo "$DETAILS"
-            echo "DETAILS_EOF"
-          } >> "$GITHUB_OUTPUT"
-
-          if [ "$TOTAL_FAILED" -gt 0 ] || [ "$TOTAL_MISMATCH" -gt 0 ]; then
-            echo "result=failed" >> "$GITHUB_OUTPUT"
-            echo "::warning::Postman: failures or mismatches found"
-          else
-            echo "result=passed" >> "$GITHUB_OUTPUT"
+          # Commit removals if any
+          if [ -n "$REMOVED" ]; then
+            git add -A "$DOWNLOAD_DIR"
+            if ! git diff --staged --quiet; then
+              git commit -m "Remove Postman-failed iFlows - run ${{ github.run_id }}"
+              git fetch origin "$TARGET_BRANCH"
+              git pull --rebase origin "$TARGET_BRANCH" || git rebase --abort || true
+              git push origin "$TARGET_BRANCH" || echo "::warning::push failed"
+            fi
+            echo "Removed iFlows: $REMOVED"
           fi
+
+          echo "Total failed: $TOTAL_FAILED"
+
+          if [ "$TOTAL_FAILED" -gt 0 ]; then
+            echo "::error title=Postman FAILED::$TOTAL_FAILED iFlow(s) failed/mismatched and were removed. Fix and re-run."
+            exit 1
+          fi
+
+          echo "All Postman tests passed"
 
       - name: Upload Postman reports
         if: always()
@@ -589,111 +596,11 @@ jobs:
           if-no-files-found: ignore
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 4: Remove ONLY failed iFlow folders (keeps passed ones)
-  # ═══════════════════════════════════════════════════════════════
-  cleanup-failed:
-    name: Remove failed iFlows
-    needs: [download-ready-iflows, run-cpilint, run-postman]
-    if: >
-      always() &&
-      needs.download-ready-iflows.outputs.skip_download != 'true' &&
-      (needs.run-cpilint.outputs.result == 'failed' || needs.run-postman.outputs.result == 'failed')
-    runs-on: ubuntu-latest
-
-    outputs:
-      removed: ${{ steps.remove.outputs.removed }}
-
-    steps:
-      - name: Checkout target branch
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TARGET_BRANCH }}
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Git
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Remove failed iFlow directories
-        id: remove
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Identifying failed iFlows to remove..."
-          REMOVED=""
-
-          process_failures() {
-            local details="$1" gate="$2"
-            while IFS='|' read -r id ver status; do
-              [ -z "$id" ] && continue
-              if [ "$status" = "FAIL" ] || [ "$status" = "MISMATCH" ]; then
-                SAFE_ID=$(echo "$id" | tr -cd '[:alnum:]_.-')
-
-                # SAFETY: never allow empty ID (would target root)
-                if [ -z "$SAFE_ID" ]; then
-                  echo "SKIP: empty iFlow ID - refusing to delete"
-                  continue
-                fi
-
-                IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
-
-                # SAFETY: never delete the download root itself
-                if [ "$IFLOW_DIR" = "$DOWNLOAD_DIR" ] || [ "$IFLOW_DIR" = "$DOWNLOAD_DIR/" ]; then
-                  echo "SKIP: refusing to delete root $DOWNLOAD_DIR"
-                  continue
-                fi
-
-                if [ -d "$IFLOW_DIR" ]; then
-                  rm -rf "$IFLOW_DIR"
-                  echo "Removed [$gate]: $IFLOW_DIR"
-                  REMOVED="${REMOVED}${id} (${gate}); "
-                else
-                  echo "Not found (already removed?): $IFLOW_DIR"
-                fi
-              fi
-            done <<< "$details"
-          }
-
-          process_failures "${{ needs.run-cpilint.outputs.details }}" "CPILint"
-          process_failures "${{ needs.run-postman.outputs.details }}" "Postman"
-
-          echo "removed=$REMOVED" >> "$GITHUB_OUTPUT"
-          echo "Removed summary: ${REMOVED:-none}"
-
-      - name: Commit and push removal
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          git add -A "$DOWNLOAD_DIR"
-
-          if git diff --staged --quiet; then
-            echo "::notice::Nothing to remove."
-            exit 0
-          fi
-
-          git commit -m "Remove failed iFlows (quality gate failure) - run ${{ github.run_id }}"
-
-          git fetch origin "$TARGET_BRANCH"
-          if ! git pull --rebase origin "$TARGET_BRANCH"; then
-            git rebase --abort || true
-            echo "::warning::Rebase conflict during cleanup"
-            exit 1
-          fi
-
-          git push origin "$TARGET_BRANCH"
-          echo "Failed iFlow folders removed and pushed"
-
-  # ═══════════════════════════════════════════════════════════════
-  # JOB 5: Send Quality Gate Report Email
+  # JOB 4: Send Quality Gate Report Email (uses job RESULT status)
   # ═══════════════════════════════════════════════════════════════
   send-report:
     name: Send quality gate report
-    needs: [download-ready-iflows, run-cpilint, run-postman, cleanup-failed]
+    needs: [download-ready-iflows, run-cpilint, run-postman]
     if: always() && needs.download-ready-iflows.outputs.skip_download != 'true'
     runs-on: ubuntu-latest
 
@@ -704,74 +611,57 @@ jobs:
         run: |
           set -euo pipefail
 
-          CP_RESULT="${{ needs.run-cpilint.outputs.result }}"
-          PM_RESULT="${{ needs.run-postman.outputs.result }}"
-          CP_PASS="${{ needs.run-cpilint.outputs.passed }}"
-          CP_FAIL="${{ needs.run-cpilint.outputs.failed }}"
-          PM_PASS="${{ needs.run-postman.outputs.passed }}"
-          PM_FAIL="${{ needs.run-postman.outputs.failed }}"
-          REMOVED="${{ needs.cleanup-failed.outputs.removed }}"
+          # Job STATUS is reliably available even for failed jobs
+          CP="${{ needs.run-cpilint.result }}"
+          PM="${{ needs.run-postman.result }}"
 
-          if [ "$CP_RESULT" = "passed" ] && [ "$PM_RESULT" = "passed" ]; then
+          echo "CPILint job status : $CP"
+          echo "Postman job status : $PM"
+
+          CP_LABEL=$([ "$CP" = "success" ] && echo "PASSED" || echo "FAILED")
+          PM_LABEL="SKIPPED"
+          [ "$PM" = "success" ] && PM_LABEL="PASSED"
+          [ "$PM" = "failure" ] && PM_LABEL="FAILED"
+
+          if [ "$CP" = "success" ] && { [ "$PM" = "success" ] || [ "$PM" = "skipped" ]; }; then
             OVERALL="PASSED"; PREFIX="[PASSED]"
             ACTION_MSG="All quality gates passed. iFlows are ready for the next step."
+            HEADER_COLOR="#107c10"
           else
             OVERALL="FAILED"; PREFIX="[FAILED]"
-            ACTION_MSG="ACTION REQUIRED: One or more quality gates failed. The affected iFlow(s) have been REMOVED from the repository. Please FIX the reported issues in SAP CPI, save a new version, and RE-RUN the pipeline."
+            ACTION_MSG="ACTION REQUIRED: One or more quality gates failed. The affected iFlow(s) have been REMOVED from the repository. Please FIX the issues in SAP CPI, save a new version, and RE-RUN the pipeline."
+            HEADER_COLOR="#d13438"
           fi
 
           echo "subject=$PREFIX Quality Gate Report - $(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
 
-          CP_ROWS=""
-          while IFS='|' read -r id ver status; do
-            [ -z "$id" ] && continue
-            COLOR=$([ "$status" = "PASS" ] && echo "#107c10" || echo "#d13438")
-            CP_ROWS="${CP_ROWS}<tr><td style='padding:8px;border:1px solid #ddd;'>${id}</td><td style='padding:8px;border:1px solid #ddd;'>${ver}</td><td style='padding:8px;border:1px solid #ddd;color:${COLOR};font-weight:bold;'>${status}</td></tr>"
-          done <<< "${{ needs.run-cpilint.outputs.details }}"
-
-          PM_ROWS=""
-          while IFS='|' read -r id ver status; do
-            [ -z "$id" ] && continue
-            case "$status" in
-              PASS)     COLOR="#107c10" ;;
-              FAIL)     COLOR="#d13438" ;;
-              MISMATCH) COLOR="#f59e0b" ;;
-              *)        COLOR="#666666" ;;
-            esac
-            PM_ROWS="${PM_ROWS}<tr><td style='padding:8px;border:1px solid #ddd;'>${id}</td><td style='padding:8px;border:1px solid #ddd;'>${ver}</td><td style='padding:8px;border:1px solid #ddd;color:${COLOR};font-weight:bold;'>${status}</td></tr>"
-          done <<< "${{ needs.run-postman.outputs.details }}"
-
-          REMOVED_SECTION=""
-          if [ -n "$REMOVED" ]; then
-            REMOVED_SECTION="<div class='gate' style='background:#fff3cd;'>Removed from repository: ${REMOVED}</div>"
-          fi
-
           cat > report.html << HTML_EOF
           <!DOCTYPE html>
           <html><head><style>
-            body { font-family: Arial, sans-serif; color: #24292e; max-width: 800px; margin: 0 auto; }
-            .header { background: #0366d6; color: white; padding: 25px; text-align: center; }
-            .header.failed { background: #d13438; }
+            body { font-family: Arial, sans-serif; color: #24292e; max-width: 700px; margin: 0 auto; }
+            .header { background: ${HEADER_COLOR}; color: white; padding: 25px; text-align: center; border-radius: 8px 8px 0 0; }
             .content { padding: 25px; border: 1px solid #e1e4e8; }
-            table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+            table { width: 100%; border-collapse: collapse; margin: 15px 0; }
             th { background: #0366d6; color: white; padding: 10px; text-align: left; }
-            .gate { background: #f6f8fa; padding: 12px; margin: 20px 0 8px; font-weight: bold; }
-            .action { background: #fff3cd; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0; }
+            td { padding: 10px; border: 1px solid #ddd; }
+            .action { background: #fff3cd; border-left: 4px solid #f59e0b; padding: 15px; margin: 15px 0; }
           </style></head>
           <body>
-            <div class="header $([ "$OVERALL" = "FAILED" ] && echo failed)">
+            <div class="header">
               <h1>CI/CD Quality Gate Report</h1>
               <h2>Overall: ${OVERALL}</h2>
             </div>
             <div class="content">
               <p><strong>Branch:</strong> ${TARGET_BRANCH} | <strong>Time:</strong> $(date -u +'%Y-%m-%d %H:%M UTC')</p>
               <div class="action"><strong>${ACTION_MSG}</strong></div>
-              ${REMOVED_SECTION}
-              <div class="gate">Gate 1: CPILint (Static) - Passed: ${CP_PASS:-0} | Failed: ${CP_FAIL:-0}</div>
-              <table><thead><tr><th>iFlow ID</th><th>Version</th><th>Result</th></tr></thead><tbody>${CP_ROWS}</tbody></table>
-              <div class="gate">Gate 2: Postman (Runtime) - Passed: ${PM_PASS:-0} | Failed: ${PM_FAIL:-0}</div>
-              <table><thead><tr><th>iFlow ID</th><th>Version</th><th>Result</th></tr></thead><tbody>${PM_ROWS}</tbody></table>
-              <p style="margin-top:20px;">Detailed logs available as workflow artifacts.</p>
+              <table>
+                <thead><tr><th>Quality Gate</th><th>Result</th></tr></thead>
+                <tbody>
+                  <tr><td>Gate 1: CPILint (Static Analysis)</td><td><strong>${CP_LABEL}</strong></td></tr>
+                  <tr><td>Gate 2: Postman (Runtime Tests)</td><td><strong>${PM_LABEL}</strong></td></tr>
+                </tbody>
+              </table>
+              <p>Detailed per-iFlow logs are available in the workflow run artifacts (cpilint-reports, postman-reports).</p>
             </div>
           </body></html>
           HTML_EOF
@@ -789,42 +679,3 @@ jobs:
           html_body: file://report.html
           from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
           to: ${{ secrets.EMAIL_DISTRIBUTION_LIST }}
-
-# ═══════════════════════════════════════════════════════════════
-  # JOB 6: Quality gate status - fails workflow if gates failed
-  #        (blocks PR creation downstream)
-  # ═══════════════════════════════════════════════════════════════
-  quality-gate-status:
-    name: Quality gate status
-    needs: [download-ready-iflows, run-cpilint, run-postman]
-    if: always() && needs.download-ready-iflows.outputs.skip_download != 'true'
-    runs-on: ubuntu-latest
-
-    outputs:
-      gates_passed: ${{ steps.evaluate.outputs.gates_passed }}
-
-    steps:
-      - name: Evaluate quality gate results
-        id: evaluate
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          CP="${{ needs.run-cpilint.outputs.result }}"
-          PM="${{ needs.run-postman.outputs.result }}"
-
-          echo "═══════════════════════════════════════════════"
-          echo "Quality Gate Evaluation"
-          echo "═══════════════════════════════════════════════"
-          echo "CPILint result : $CP"
-          echo "Postman result : $PM"
-          echo "═══════════════════════════════════════════════"
-
-          if [ "$CP" = "failed" ] || [ "$PM" = "failed" ]; then
-            echo "gates_passed=false" >> "$GITHUB_OUTPUT"
-            echo "::error title=Quality Gates FAILED::Failed iFlows removed. Fix issues in SAP CPI, save new version, and re-run. PR will NOT be created."
-            exit 1
-          fi
-
-          echo "gates_passed=true" >> "$GITHUB_OUTPUT"
-          echo "All quality gates PASSED - ready for PR creation"
