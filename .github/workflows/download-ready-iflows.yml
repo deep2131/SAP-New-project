@@ -334,7 +334,7 @@ jobs:
   run-cpilint:
     name: CPILint static analysis
     needs: download-ready-iflows
-    if: always() && needs.download-ready-iflows.result == 'success'
+    if: needs.download-ready-iflows.outputs.skip_download != 'true'
     runs-on: ubuntu-latest
 
     outputs:
@@ -447,7 +447,7 @@ jobs:
   run-postman:
     name: Postman collection tests
     needs: [download-ready-iflows, run-cpilint]
-    if: always() && needs.download-ready-iflows.result == 'success' && needs.run-cpilint.outputs.result == 'passed'
+    if: needs.download-ready-iflows.outputs.skip_download != 'true' && needs.run-cpilint.outputs.result == 'passed'
     runs-on: ubuntu-latest
 
     outputs:
@@ -597,7 +597,7 @@ jobs:
   send-report:
     name: Send quality gate report
     needs: [download-ready-iflows, run-cpilint, run-postman]
-    if: always() && needs.download-ready-iflows.result == 'success'
+    if: always() && needs.download-ready-iflows.outputs.skip_download != 'true'
     runs-on: ubuntu-latest
 
     steps:
