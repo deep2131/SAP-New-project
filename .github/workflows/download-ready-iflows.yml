@@ -420,7 +420,7 @@ jobs:
             echo "DEBUG: Derived VERSION  = $VERSION"
             echo "════════════════════════════════════════"
 
-            "$CPILINT_BIN" -rules "$CPILINT_RULES" -files "$zip" 2>&1 | tee "cpilint-${IFLOW_ID}.log"
+            "$CPILINT_BIN" -rules "$CPILINT_RULES" -files "$zip" 2>&1 | tee "cpilint-${IFLOW_ID}.log" || true
             CPILINT_EXIT=${PIPESTATUS[0]}
 
             echo "DEBUG: CPILint exit code = $CPILINT_EXIT"
@@ -589,7 +589,7 @@ jobs:
               postman collection run "$collection" \
                 $ENV_ARG \
                 --env-var "baseUrl=$CPI_DEV_ENDPOINT" \
-                2>&1 | tee "postman-${FOLDER_IFLOW_ID}.log"
+                2>&1 | tee "postman-${FOLDER_IFLOW_ID}.log" || true
               POSTMAN_EXIT=${PIPESTATUS[0]}
 
               if [ "$POSTMAN_EXIT" -eq 0 ]; then
