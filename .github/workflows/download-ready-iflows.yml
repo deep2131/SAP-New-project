@@ -21,7 +21,7 @@ env:
 
 jobs:
   # ═══════════════════════════════════════════════════════════════
-  # JOB 1: Download iFlows (your existing job + skip output added)
+  # JOB 1: Download iFlows from SAP CPI
   # ═══════════════════════════════════════════════════════════════
   download-ready-iflows:
     name: Download X.Y.Z.ReadyForDeployment iFlows from SAP CPI
@@ -359,7 +359,11 @@ jobs:
       - name: Verify rules file
         shell: bash
         run: |
-          [ ! -f "$CPILINT_RULES" ] && { echo "::error::$CPILINT_RULES not found"; exit 1; }
+          set -euo pipefail
+          if [ ! -f "$CPILINT_RULES" ]; then
+            echo "::error::$CPILINT_RULES not found"
+            exit 1
+          fi
           echo "Rules file found: $CPILINT_RULES"
 
       - name: Install CPILint
@@ -440,6 +444,46 @@ jobs:
   # ═══════════════════════════════════════════════════════════════
   # JOB 3: Postman Collection Tests (Official Postman CLI)
   # ═══════════════════════════════════════════════════════════════
+  run-postman:
+    name: Postman collection tests
+    needs: [download-ready-iflows, run-cpilint]
+    if: needs.download-ready-iflows.outputs.skip_download != 'true' && needs.run-cpilint.outputs.result == 'passed'
+    runs-on: ubuntu-latest
+
+    outputs:
+      result: ${{ steps.postman.outputs.result }}
+      passed: ${{ steps.postman.outputs.passed }}
+      failed: ${{ steps.postman.outputs.failed }}
+      details: ${{ steps.postman.outputs.details }}
+
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+
+      - name: Install Postman CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Installing official Postman CLI..."
+          curl -o- "https://dl-cli.pstmn.io/install/linux64.sh" | sh
+          echo "Postman CLI: $(postman --version)"
+
+      - name: Login to Postman CLI
+        shell: bash
+        env:
+          POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${POSTMAN_API_KEY:-}" ]; then
+            echo "::warning::POSTMAN_API_KEY not set - running in local mode only"
+          else
+            postman login --with-api-key "$POSTMAN_API_KEY"
+            echo "Logged in to Postman CLI"
+          fi
+
       - name: Run Postman collections (with iFlow name matching)
         id: postman
         shell: bash
@@ -449,7 +493,6 @@ jobs:
           set -euo pipefail
           echo "Running Postman CLI tests with iFlow matching..."
 
-          # Find all collection files (supports multiple, any *.collection.json)
           COLLECTIONS=$(find "$DOWNLOAD_DIR" -name "*.collection.json")
           COLL_COUNT=$(echo "$COLLECTIONS" | grep -c . || echo 0)
 
@@ -472,16 +515,12 @@ jobs:
           while IFS= read -r collection; do
             [ -z "$collection" ] && continue
 
-            # Derive the iFlow ID from the folder structure
-            # Path: btp-iflows/<IFLOW_ID>/<VERSION>/tests/<file>.collection.json
             TESTS_DIR=$(dirname "$collection")
             VERSION_DIR=$(dirname "$TESTS_DIR")
             IFLOW_DIR=$(dirname "$VERSION_DIR")
             FOLDER_IFLOW_ID=$(basename "$IFLOW_DIR")
             VERSION=$(basename "$VERSION_DIR")
 
-            # Extract iFlow ID from the collection FILENAME
-            # e.g., OrderFlow.collection.json -> OrderFlow
             COLLECTION_FILE=$(basename "$collection")
             FILE_IFLOW_ID="${COLLECTION_FILE%.collection.json}"
 
@@ -490,11 +529,9 @@ jobs:
             echo "Folder iFlow ID : $FOLDER_IFLOW_ID"
             echo "File iFlow ID   : $FILE_IFLOW_ID"
 
-            # ═══ NAME MATCHING CHECK ═══
             if [ "$FILE_IFLOW_ID" != "$FOLDER_IFLOW_ID" ]; then
-              echo "❌ MISMATCH: Collection '$FILE_IFLOW_ID' does not match iFlow '$FOLDER_IFLOW_ID'"
-              echo "   Expected file name: ${FOLDER_IFLOW_ID}.collection.json"
-              echo "   Skipping this collection - wrong iFlow"
+              echo "MISMATCH: Collection '$FILE_IFLOW_ID' does not match iFlow '$FOLDER_IFLOW_ID'"
+              echo "Expected file name: ${FOLDER_IFLOW_ID}.collection.json"
               TOTAL_MISMATCH=$((TOTAL_MISMATCH + 1))
               DETAILS="${DETAILS}${FOLDER_IFLOW_ID}|v${VERSION}|MISMATCH"$'\n'
               continue
@@ -502,9 +539,8 @@ jobs:
 
             echo "MATCH confirmed: testing $FILE_IFLOW_ID"
 
-            # Optional deeper check: verify a matching ZIP exists for this iFlow
             if ! find "$IFLOW_DIR" -name "${FOLDER_IFLOW_ID}_*.zip" | grep -q .; then
-              echo "WARNING: No matching ZIP found for $FOLDER_IFLOW_ID (continuing anyway)"
+              echo "WARNING: No matching ZIP found for $FOLDER_IFLOW_ID (continuing)"
             fi
 
             ENV_FILE="$TESTS_DIR/environment.json"
@@ -538,7 +574,6 @@ jobs:
             echo "DETAILS_EOF"
           } >> "$GITHUB_OUTPUT"
 
-          # Fail if any test failed OR any mismatch found
           if [ "$TOTAL_FAILED" -gt 0 ] || [ "$TOTAL_MISMATCH" -gt 0 ]; then
             echo "result=failed" >> "$GITHUB_OUTPUT"
             [ "$TOTAL_MISMATCH" -gt 0 ] && echo "::error::$TOTAL_MISMATCH collection(s) had name mismatches"
@@ -547,6 +582,15 @@ jobs:
           fi
 
           echo "result=passed" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Postman reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postman-reports
+          path: postman-*.log
+          if-no-files-found: ignore
+
   # ═══════════════════════════════════════════════════════════════
   # JOB 4: Send Quality Gate Report Email
   # ═══════════════════════════════════════════════════════════════
@@ -580,7 +624,6 @@ jobs:
 
           echo "subject=$PREFIX Quality Gate Report - $(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
 
-          # CPILint rows
           CP_ROWS=""
           while IFS='|' read -r id ver status; do
             [ -z "$id" ] && continue
@@ -588,57 +631,55 @@ jobs:
             CP_ROWS="${CP_ROWS}<tr><td style='padding:8px;border:1px solid #ddd;'>${id}</td><td style='padding:8px;border:1px solid #ddd;'>${ver}</td><td style='padding:8px;border:1px solid #ddd;color:${COLOR};font-weight:bold;'>${status}</td></tr>"
           done <<< "${{ needs.run-cpilint.outputs.details }}"
 
-          # Postman rows
           PM_ROWS=""
           while IFS='|' read -r id ver status; do
-             [ -z "$id" ] && continue
-             case "$status" in
-               PASS)     COLOR="#107c10" ;;
-               FAIL)     COLOR="#d13438" ;;
-               MISMATCH) COLOR="#f59e0b" ;;   # amber for mismatch
-              *)         COLOR="#666" ;;
-              esac
-              PM_ROWS="${PM_ROWS}<tr><td>${id}</td><td>${ver}</td><td style='color:${COLOR};font-weight:bold;'>${status}</td></tr>"
-              done <<< "${{ needs.run-postman.outputs.details }}"
+            [ -z "$id" ] && continue
+            case "$status" in
+              PASS)     COLOR="#107c10" ;;
+              FAIL)     COLOR="#d13438" ;;
+              MISMATCH) COLOR="#f59e0b" ;;
+              *)        COLOR="#666666" ;;
+            esac
+            PM_ROWS="${PM_ROWS}<tr><td style='padding:8px;border:1px solid #ddd;'>${id}</td><td style='padding:8px;border:1px solid #ddd;'>${ver}</td><td style='padding:8px;border:1px solid #ddd;color:${COLOR};font-weight:bold;'>${status}</td></tr>"
+          done <<< "${{ needs.run-postman.outputs.details }}"
 
           cat > report.html << HTML_EOF
-<!DOCTYPE html>
-<html><head><style>
-  body { font-family: Arial, sans-serif; color: #24292e; max-width: 800px; margin: 0 auto; }
-  .header { background: linear-gradient(135deg,#0366d6,#044289); color: white; padding: 25px; text-align: center; border-radius: 8px 8px 0 0; }
-  .content { padding: 25px; border: 1px solid #e1e4e8; }
-  table { width: 100%; border-collapse: collapse; margin: 10px 0; }
-  th { background: #0366d6; color: white; padding: 10px; text-align: left; }
-  .gate { background: #f6f8fa; padding: 12px; margin: 20px 0 8px; font-weight: bold; font-size: 16px; border-radius: 6px; }
-</style></head>
-<body>
-  <div class="header">
-    <h1>CI/CD Quality Gate Report</h1>
-    <h2>Overall: ${OVERALL}</h2>
-  </div>
-  <div class="content">
-    <p><strong>Branch:</strong> ${TARGET_BRANCH} | <strong>Time:</strong> $(date -u +'%Y-%m-%d %H:%M UTC')</p>
+          <!DOCTYPE html>
+          <html><head><style>
+            body { font-family: Arial, sans-serif; color: #24292e; max-width: 800px; margin: 0 auto; }
+            .header { background: #0366d6; color: white; padding: 25px; text-align: center; }
+            .content { padding: 25px; border: 1px solid #e1e4e8; }
+            table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+            th { background: #0366d6; color: white; padding: 10px; text-align: left; }
+            .gate { background: #f6f8fa; padding: 12px; margin: 20px 0 8px; font-weight: bold; font-size: 16px; }
+          </style></head>
+          <body>
+            <div class="header">
+              <h1>CI/CD Quality Gate Report</h1>
+              <h2>Overall: ${OVERALL}</h2>
+            </div>
+            <div class="content">
+              <p><strong>Branch:</strong> ${TARGET_BRANCH} | <strong>Time:</strong> $(date -u +'%Y-%m-%d %H:%M UTC')</p>
 
-    <div class="gate">Gate 1: CPILint (Static) - Passed: ${CP_PASS:-0} | Failed: ${CP_FAIL:-0}</div>
-    <table>
-      <thead><tr><th>iFlow ID</th><th>Version</th><th>Result</th></tr></thead>
-      <tbody>${CP_ROWS}</tbody>
-    </table>
+              <div class="gate">Gate 1: CPILint (Static) - Passed: ${CP_PASS:-0} | Failed: ${CP_FAIL:-0}</div>
+              <table>
+                <thead><tr><th>iFlow ID</th><th>Version</th><th>Result</th></tr></thead>
+                <tbody>${CP_ROWS}</tbody>
+              </table>
 
-    <div class="gate">Gate 2: Postman (Runtime) - Passed: ${PM_PASS:-0} | Failed: ${PM_FAIL:-0}</div>
-    <table>
-      <thead><tr><th>iFlow ID</th><th>Version</th><th>Result</th></tr></thead>
-      <tbody>${PM_ROWS}</tbody>
-    </table>
+              <div class="gate">Gate 2: Postman (Runtime) - Passed: ${PM_PASS:-0} | Failed: ${PM_FAIL:-0}</div>
+              <table>
+                <thead><tr><th>iFlow ID</th><th>Version</th><th>Result</th></tr></thead>
+                <tbody>${PM_ROWS}</tbody>
+              </table>
 
-    <p style="margin-top:20px;">Detailed logs available as workflow artifacts.</p>
-    <p>id }}">View Full Workflow Run</a></p>
-  </div>
-</body></html>
-HTML_EOF
+              <p style="margin-top:20px;">Detailed logs available as workflow artifacts.</p>
+            </div>
+          </body></html>
+          HTML_EOF
 
-      echo "Report prepared"
-      
+          echo "Report prepared"
+
       - name: Send email report
         uses: dawidd6/action-send-mail@v3
         with:
@@ -648,8 +689,5 @@ HTML_EOF
           password: ${{ secrets.SMTP_PASSWORD }}
           subject: ${{ steps.report.outputs.subject }}
           html_body: file://report.html
-          from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
-          to: ${{ secrets.EMAIL_DISTRIBUTION_LIST }}
-
           from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
           to: ${{ secrets.EMAIL_DISTRIBUTION_LIST }}
