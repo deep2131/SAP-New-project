@@ -21,7 +21,7 @@ env:
 
 jobs:
   # ═══════════════════════════════════════════════════════════════
-  # JOB 1: Download iFlows (your existing job + skip output added)
+  # JOB 1: Download iFlows from SAP CPI
   # ═══════════════════════════════════════════════════════════════
   download-ready-iflows:
     name: Download X.Y.Z.ReadyForDeployment iFlows from SAP CPI
@@ -334,7 +334,7 @@ jobs:
   run-cpilint:
     name: CPILint static analysis
     needs: download-ready-iflows
-    if: needs.download-ready-iflows.outputs.skip_download != 'true'
+    if: always() && needs.download-ready-iflows.result == 'success'
     runs-on: ubuntu-latest
 
     outputs:
@@ -359,7 +359,11 @@ jobs:
       - name: Verify rules file
         shell: bash
         run: |
-          [ ! -f "$CPILINT_RULES" ] && { echo "::error::$CPILINT_RULES not found"; exit 1; }
+          set -euo pipefail
+          if [ ! -f "$CPILINT_RULES" ]; then
+            echo "::error::$CPILINT_RULES not found"
+            exit 1
+          fi
           echo "Rules file found: $CPILINT_RULES"
 
       - name: Install CPILint
@@ -443,7 +447,7 @@ jobs:
   run-postman:
     name: Postman collection tests
     needs: [download-ready-iflows, run-cpilint]
-    if: needs.download-ready-iflows.outputs.skip_download != 'true' && needs.run-cpilint.outputs.result == 'passed'
+    if: always() && needs.download-ready-iflows.result == 'success' && needs.run-cpilint.outputs.result == 'passed'
     runs-on: ubuntu-latest
 
     outputs:
@@ -474,22 +478,22 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${POSTMAN_API_KEY:-}" ]; then
-            echo "::warning::POSTMAN_API_KEY not set - running collections in local mode only"
+            echo "::warning::POSTMAN_API_KEY not set - running in local mode only"
           else
             postman login --with-api-key "$POSTMAN_API_KEY"
             echo "Logged in to Postman CLI"
           fi
 
-      - name: Run Postman collections
+      - name: Run Postman collections (with iFlow name matching)
         id: postman
         shell: bash
         env:
           CPI_DEV_ENDPOINT: ${{ secrets.CPI_DEV_ENDPOINT }}
         run: |
           set -euo pipefail
-          echo "Running Postman CLI tests..."
+          echo "Running Postman CLI tests with iFlow matching..."
 
-          COLLECTIONS=$(find "$DOWNLOAD_DIR" -path "*/tests/collection.json")
+          COLLECTIONS=$(find "$DOWNLOAD_DIR" -name "*.collection.json")
           COLL_COUNT=$(echo "$COLLECTIONS" | grep -c . || echo 0)
 
           if [ "$COLL_COUNT" -eq 0 ]; then
@@ -505,39 +509,62 @@ jobs:
 
           TOTAL_PASSED=0
           TOTAL_FAILED=0
+          TOTAL_MISMATCH=0
           DETAILS=""
 
           while IFS= read -r collection; do
             [ -z "$collection" ] && continue
 
-            IFLOW_DIR=$(dirname "$(dirname "$collection")")
-            IFLOW_ID=$(basename "$(dirname "$IFLOW_DIR")")
-            VERSION=$(basename "$IFLOW_DIR")
+            TESTS_DIR=$(dirname "$collection")
+            VERSION_DIR=$(dirname "$TESTS_DIR")
+            IFLOW_DIR=$(dirname "$VERSION_DIR")
+            FOLDER_IFLOW_ID=$(basename "$IFLOW_DIR")
+            VERSION=$(basename "$VERSION_DIR")
 
-            ENV_FILE="$(dirname "$collection")/environment.json"
+            COLLECTION_FILE=$(basename "$collection")
+            FILE_IFLOW_ID="${COLLECTION_FILE%.collection.json}"
+
+            echo "─────────────────────────────────────────────"
+            echo "Collection file : $COLLECTION_FILE"
+            echo "Folder iFlow ID : $FOLDER_IFLOW_ID"
+            echo "File iFlow ID   : $FILE_IFLOW_ID"
+
+            if [ "$FILE_IFLOW_ID" != "$FOLDER_IFLOW_ID" ]; then
+              echo "MISMATCH: Collection '$FILE_IFLOW_ID' does not match iFlow '$FOLDER_IFLOW_ID'"
+              echo "Expected file name: ${FOLDER_IFLOW_ID}.collection.json"
+              TOTAL_MISMATCH=$((TOTAL_MISMATCH + 1))
+              DETAILS="${DETAILS}${FOLDER_IFLOW_ID}|v${VERSION}|MISMATCH"$'\n'
+              continue
+            fi
+
+            echo "MATCH confirmed: testing $FILE_IFLOW_ID"
+
+            if ! find "$IFLOW_DIR" -name "${FOLDER_IFLOW_ID}_*.zip" | grep -q .; then
+              echo "WARNING: No matching ZIP found for $FOLDER_IFLOW_ID (continuing)"
+            fi
+
+            ENV_FILE="$TESTS_DIR/environment.json"
             ENV_ARG=""
             [ -f "$ENV_FILE" ] && ENV_ARG="--environment $ENV_FILE"
 
-            echo "─────────────────────────────────────────────"
-            echo "Testing: $IFLOW_ID v$VERSION"
-            echo "─────────────────────────────────────────────"
+            echo "Testing: $FOLDER_IFLOW_ID v$VERSION"
 
-            # Postman CLI runs the local collection.json file directly
             if postman collection run "$collection" \
                 $ENV_ARG \
                 --env-var "baseUrl=$CPI_DEV_ENDPOINT" \
-                2>&1 | tee "postman-${IFLOW_ID}.log"; then
-              echo "PASSED: $IFLOW_ID"
+                2>&1 | tee "postman-${FOLDER_IFLOW_ID}.log"; then
+              echo "PASSED: $FOLDER_IFLOW_ID"
               TOTAL_PASSED=$((TOTAL_PASSED + 1))
-              DETAILS="${DETAILS}${IFLOW_ID}|v${VERSION}|PASS"$'\n'
+              DETAILS="${DETAILS}${FOLDER_IFLOW_ID}|v${VERSION}|PASS"$'\n'
             else
-              echo "FAILED: $IFLOW_ID"
+              echo "FAILED: $FOLDER_IFLOW_ID"
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
-              DETAILS="${DETAILS}${IFLOW_ID}|v${VERSION}|FAIL"$'\n'
+              DETAILS="${DETAILS}${FOLDER_IFLOW_ID}|v${VERSION}|FAIL"$'\n'
             fi
           done <<< "$COLLECTIONS"
 
-          echo "Passed: $TOTAL_PASSED | Failed: $TOTAL_FAILED"
+          echo "─────────────────────────────────────────────"
+          echo "Passed: $TOTAL_PASSED | Failed: $TOTAL_FAILED | Mismatches: $TOTAL_MISMATCH"
           echo "passed=$TOTAL_PASSED" >> "$GITHUB_OUTPUT"
           echo "failed=$TOTAL_FAILED" >> "$GITHUB_OUTPUT"
 
@@ -547,11 +574,13 @@ jobs:
             echo "DETAILS_EOF"
           } >> "$GITHUB_OUTPUT"
 
-          if [ "$TOTAL_FAILED" -gt 0 ]; then
+          if [ "$TOTAL_FAILED" -gt 0 ] || [ "$TOTAL_MISMATCH" -gt 0 ]; then
             echo "result=failed" >> "$GITHUB_OUTPUT"
-            echo "::error::Postman: $TOTAL_FAILED collection(s) failed"
+            [ "$TOTAL_MISMATCH" -gt 0 ] && echo "::error::$TOTAL_MISMATCH collection(s) had name mismatches"
+            [ "$TOTAL_FAILED" -gt 0 ] && echo "::error::$TOTAL_FAILED collection(s) failed tests"
             exit 1
           fi
+
           echo "result=passed" >> "$GITHUB_OUTPUT"
 
       - name: Upload Postman reports
@@ -561,13 +590,14 @@ jobs:
           name: postman-reports
           path: postman-*.log
           if-no-files-found: ignore
+
   # ═══════════════════════════════════════════════════════════════
   # JOB 4: Send Quality Gate Report Email
   # ═══════════════════════════════════════════════════════════════
   send-report:
     name: Send quality gate report
     needs: [download-ready-iflows, run-cpilint, run-postman]
-    if: always() && needs.download-ready-iflows.outputs.skip_download != 'true'
+    if: always() && needs.download-ready-iflows.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -594,7 +624,6 @@ jobs:
 
           echo "subject=$PREFIX Quality Gate Report - $(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
 
-          # CPILint rows
           CP_ROWS=""
           while IFS='|' read -r id ver status; do
             [ -z "$id" ] && continue
@@ -602,49 +631,52 @@ jobs:
             CP_ROWS="${CP_ROWS}<tr><td style='padding:8px;border:1px solid #ddd;'>${id}</td><td style='padding:8px;border:1px solid #ddd;'>${ver}</td><td style='padding:8px;border:1px solid #ddd;color:${COLOR};font-weight:bold;'>${status}</td></tr>"
           done <<< "${{ needs.run-cpilint.outputs.details }}"
 
-          # Postman rows
           PM_ROWS=""
           while IFS='|' read -r id ver status; do
             [ -z "$id" ] && continue
-            COLOR=$([ "$status" = "PASS" ] && echo "#107c10" || echo "#d13438")
+            case "$status" in
+              PASS)     COLOR="#107c10" ;;
+              FAIL)     COLOR="#d13438" ;;
+              MISMATCH) COLOR="#f59e0b" ;;
+              *)        COLOR="#666666" ;;
+            esac
             PM_ROWS="${PM_ROWS}<tr><td style='padding:8px;border:1px solid #ddd;'>${id}</td><td style='padding:8px;border:1px solid #ddd;'>${ver}</td><td style='padding:8px;border:1px solid #ddd;color:${COLOR};font-weight:bold;'>${status}</td></tr>"
           done <<< "${{ needs.run-postman.outputs.details }}"
 
           cat > report.html << HTML_EOF
-<!DOCTYPE html>
-<html><head><style>
-  body { font-family: Arial, sans-serif; color: #24292e; max-width: 800px; margin: 0 auto; }
-  .header { background: linear-gradient(135deg,#0366d6,#044289); color: white; padding: 25px; text-align: center; border-radius: 8px 8px 0 0; }
-  .content { padding: 25px; border: 1px solid #e1e4e8; }
-  table { width: 100%; border-collapse: collapse; margin: 10px 0; }
-  th { background: #0366d6; color: white; padding: 10px; text-align: left; }
-  .gate { background: #f6f8fa; padding: 12px; margin: 20px 0 8px; font-weight: bold; font-size: 16px; border-radius: 6px; }
-</style></head>
-<body>
-  <div class="header">
-    <h1>CI/CD Quality Gate Report</h1>
-    <h2>Overall: ${OVERALL}</h2>
-  </div>
-  <div class="content">
-    <p><strong>Branch:</strong> ${TARGET_BRANCH} | <strong>Time:</strong> $(date -u +'%Y-%m-%d %H:%M UTC')</p>
+          <!DOCTYPE html>
+          <html><head><style>
+            body { font-family: Arial, sans-serif; color: #24292e; max-width: 800px; margin: 0 auto; }
+            .header { background: #0366d6; color: white; padding: 25px; text-align: center; }
+            .content { padding: 25px; border: 1px solid #e1e4e8; }
+            table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+            th { background: #0366d6; color: white; padding: 10px; text-align: left; }
+            .gate { background: #f6f8fa; padding: 12px; margin: 20px 0 8px; font-weight: bold; font-size: 16px; }
+          </style></head>
+          <body>
+            <div class="header">
+              <h1>CI/CD Quality Gate Report</h1>
+              <h2>Overall: ${OVERALL}</h2>
+            </div>
+            <div class="content">
+              <p><strong>Branch:</strong> ${TARGET_BRANCH} | <strong>Time:</strong> $(date -u +'%Y-%m-%d %H:%M UTC')</p>
 
-    <div class="gate">Gate 1: CPILint (Static) - Passed: ${CP_PASS:-0} | Failed: ${CP_FAIL:-0}</div>
-    <table>
-      <thead><tr><th>iFlow ID</th><th>Version</th><th>Result</th></tr></thead>
-      <tbody>${CP_ROWS}</tbody>
-    </table>
+              <div class="gate">Gate 1: CPILint (Static) - Passed: ${CP_PASS:-0} | Failed: ${CP_FAIL:-0}</div>
+              <table>
+                <thead><tr><th>iFlow ID</th><th>Version</th><th>Result</th></tr></thead>
+                <tbody>${CP_ROWS}</tbody>
+              </table>
 
-    <div class="gate">Gate 2: Postman (Runtime) - Passed: ${PM_PASS:-0} | Failed: ${PM_FAIL:-0}</div>
-    <table>
-      <thead><tr><th>iFlow ID</th><th>Version</th><th>Result</th></tr></thead>
-      <tbody>${PM_ROWS}</tbody>
-    </table>
+              <div class="gate">Gate 2: Postman (Runtime) - Passed: ${PM_PASS:-0} | Failed: ${PM_FAIL:-0}</div>
+              <table>
+                <thead><tr><th>iFlow ID</th><th>Version</th><th>Result</th></tr></thead>
+                <tbody>${PM_ROWS}</tbody>
+              </table>
 
-    <p style="margin-top:20px;">Detailed logs available as workflow artifacts.</p>
-    <p>id }}">View Full Workflow Run</a></p>
-  </div>
-</body></html>
-HTML_EOF
+              <p style="margin-top:20px;">Detailed logs available as workflow artifacts.</p>
+            </div>
+          </body></html>
+          HTML_EOF
 
           echo "Report prepared"
 
@@ -659,4 +691,3 @@ HTML_EOF
           html_body: file://report.html
           from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
           to: ${{ secrets.EMAIL_DISTRIBUTION_LIST }}
-          echo "Report sent"
