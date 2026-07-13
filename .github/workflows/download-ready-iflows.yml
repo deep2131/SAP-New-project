@@ -329,7 +329,7 @@ jobs:
           echo "::notice title=Success::All iFlows are already downloaded. Nothing new."
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 2: CPILint Quality Gate
+  # JOB 2: CPILint Quality Gate (no exit 1 - reports via output)
   # ═══════════════════════════════════════════════════════════════
   run-cpilint:
     name: CPILint static analysis
@@ -388,7 +388,7 @@ jobs:
           ZIP_COUNT=$(echo "$ZIP_FILES" | grep -c . || echo 0)
 
           if [ "$ZIP_COUNT" -eq 0 ]; then
-            echo "result=skipped" >> "$GITHUB_OUTPUT"
+            echo "result=passed" >> "$GITHUB_OUTPUT"
             echo "passed=0" >> "$GITHUB_OUTPUT"
             echo "failed=0" >> "$GITHUB_OUTPUT"
             echo "details=" >> "$GITHUB_OUTPUT"
@@ -431,10 +431,10 @@ jobs:
 
           if [ "$TOTAL_FAILED" -gt 0 ]; then
             echo "result=failed" >> "$GITHUB_OUTPUT"
-            echo "::error::CPILint: $TOTAL_FAILED iFlow(s) failed"
-            exit 1
+            echo "::warning::CPILint: $TOTAL_FAILED iFlow(s) failed"
+          else
+            echo "result=passed" >> "$GITHUB_OUTPUT"
           fi
-          echo "result=passed" >> "$GITHUB_OUTPUT"
 
       - name: Upload CPILint reports
         if: always()
@@ -445,7 +445,7 @@ jobs:
           if-no-files-found: ignore
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 3: Postman Collection Tests
+  # JOB 3: Postman Collection Tests (no exit 1 - reports via output)
   # ═══════════════════════════════════════════════════════════════
   run-postman:
     name: Postman collection tests
@@ -501,7 +501,7 @@ jobs:
 
           if [ "$COLL_COUNT" -eq 0 ]; then
             echo "::notice::No Postman collections found"
-            echo "result=skipped" >> "$GITHUB_OUTPUT"
+            echo "result=passed" >> "$GITHUB_OUTPUT"
             echo "passed=0" >> "$GITHUB_OUTPUT"
             echo "failed=0" >> "$GITHUB_OUTPUT"
             echo "details=" >> "$GITHUB_OUTPUT"
@@ -575,12 +575,10 @@ jobs:
 
           if [ "$TOTAL_FAILED" -gt 0 ] || [ "$TOTAL_MISMATCH" -gt 0 ]; then
             echo "result=failed" >> "$GITHUB_OUTPUT"
-            [ "$TOTAL_MISMATCH" -gt 0 ] && echo "::error::$TOTAL_MISMATCH collection(s) had name mismatches"
-            [ "$TOTAL_FAILED" -gt 0 ] && echo "::error::$TOTAL_FAILED collection(s) failed tests"
-            exit 1
+            echo "::warning::Postman: failures or mismatches found"
+          else
+            echo "result=passed" >> "$GITHUB_OUTPUT"
           fi
-
-          echo "result=passed" >> "$GITHUB_OUTPUT"
 
       - name: Upload Postman reports
         if: always()
@@ -591,7 +589,7 @@ jobs:
           if-no-files-found: ignore
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 4: Remove failed iFlows from repository
+  # JOB 4: Remove ONLY failed iFlow folders (keeps passed ones)
   # ═══════════════════════════════════════════════════════════════
   cleanup-failed:
     name: Remove failed iFlows
@@ -634,7 +632,21 @@ jobs:
               [ -z "$id" ] && continue
               if [ "$status" = "FAIL" ] || [ "$status" = "MISMATCH" ]; then
                 SAFE_ID=$(echo "$id" | tr -cd '[:alnum:]_.-')
+
+                # SAFETY: never allow empty ID (would target root)
+                if [ -z "$SAFE_ID" ]; then
+                  echo "SKIP: empty iFlow ID - refusing to delete"
+                  continue
+                fi
+
                 IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
+
+                # SAFETY: never delete the download root itself
+                if [ "$IFLOW_DIR" = "$DOWNLOAD_DIR" ] || [ "$IFLOW_DIR" = "$DOWNLOAD_DIR/" ]; then
+                  echo "SKIP: refusing to delete root $DOWNLOAD_DIR"
+                  continue
+                fi
+
                 if [ -d "$IFLOW_DIR" ]; then
                   rm -rf "$IFLOW_DIR"
                   echo "Removed [$gate]: $IFLOW_DIR"
@@ -692,15 +704,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          CPILINT_RESULT="${{ needs.run-cpilint.result }}"
-          POSTMAN_RESULT="${{ needs.run-postman.result }}"
+          CP_RESULT="${{ needs.run-cpilint.outputs.result }}"
+          PM_RESULT="${{ needs.run-postman.outputs.result }}"
           CP_PASS="${{ needs.run-cpilint.outputs.passed }}"
           CP_FAIL="${{ needs.run-cpilint.outputs.failed }}"
           PM_PASS="${{ needs.run-postman.outputs.passed }}"
           PM_FAIL="${{ needs.run-postman.outputs.failed }}"
           REMOVED="${{ needs.cleanup-failed.outputs.removed }}"
 
-          if [ "$CPILINT_RESULT" = "success" ] && [ "$POSTMAN_RESULT" = "success" ]; then
+          if [ "$CP_RESULT" = "passed" ] && [ "$PM_RESULT" = "passed" ]; then
             OVERALL="PASSED"; PREFIX="[PASSED]"
             ACTION_MSG="All quality gates passed. iFlows are ready for the next step."
           else
@@ -777,3 +789,42 @@ jobs:
           html_body: file://report.html
           from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
           to: ${{ secrets.EMAIL_DISTRIBUTION_LIST }}
+
+# ═══════════════════════════════════════════════════════════════
+  # JOB 6: Quality gate status - fails workflow if gates failed
+  #        (blocks PR creation downstream)
+  # ═══════════════════════════════════════════════════════════════
+  quality-gate-status:
+    name: Quality gate status
+    needs: [download-ready-iflows, run-cpilint, run-postman]
+    if: always() && needs.download-ready-iflows.outputs.skip_download != 'true'
+    runs-on: ubuntu-latest
+
+    outputs:
+      gates_passed: ${{ steps.evaluate.outputs.gates_passed }}
+
+    steps:
+      - name: Evaluate quality gate results
+        id: evaluate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CP="${{ needs.run-cpilint.outputs.result }}"
+          PM="${{ needs.run-postman.outputs.result }}"
+
+          echo "═══════════════════════════════════════════════"
+          echo "Quality Gate Evaluation"
+          echo "═══════════════════════════════════════════════"
+          echo "CPILint result : $CP"
+          echo "Postman result : $PM"
+          echo "═══════════════════════════════════════════════"
+
+          if [ "$CP" = "failed" ] || [ "$PM" = "failed" ]; then
+            echo "gates_passed=false" >> "$GITHUB_OUTPUT"
+            echo "::error title=Quality Gates FAILED::Failed iFlows removed. Fix issues in SAP CPI, save new version, and re-run. PR will NOT be created."
+            exit 1
+          fi
+
+          echo "gates_passed=true" >> "$GITHUB_OUTPUT"
+          echo "All quality gates PASSED - ready for PR creation"
