@@ -331,7 +331,7 @@ jobs:
           echo "::notice title=Success::All iFlows are already downloaded. Nothing new."
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 2: CPILint (bulletproof exit + in-job removal)
+  # JOB 2: CPILint (bulletproof exit + remove + failure details)
   # ═══════════════════════════════════════════════════════════════
   run-cpilint:
     name: CPILint static analysis
@@ -390,6 +390,7 @@ jobs:
 
           TOTAL_FAILED=0
           REMOVED=""
+          : > failure-details.txt
 
           while IFS= read -r zip; do
             [ -z "$zip" ] && continue
@@ -410,6 +411,11 @@ jobs:
             if [ "$CPILINT_EXIT" -ne 0 ]; then
               echo "DEBUG: FAILURE - removing $IFLOW_ID"
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
+
+              REASON=$(grep -iE "In iflow|does not have|not allowed|issue" "cpilint-${IFLOW_ID}.log" | head -3 | tr '\n' ' ' | sed 's/|/-/g')
+              [ -z "$REASON" ] && REASON="CPILint rule violation (see full log)"
+
+              echo "${IFLOW_ID} v${VERSION}|CPILint|${REASON}|Open the iFlow in SAP CPI, fix the reported rule violation, save as a NEW version, and re-run the pipeline." >> failure-details.txt
 
               SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
               IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
@@ -441,7 +447,7 @@ jobs:
           fi
 
           if [ "$TOTAL_FAILED" -gt 0 ]; then
-            echo "::error title=CPILint FAILED::$TOTAL_FAILED iFlow(s) failed and were removed. Fix in SAP CPI, save new version, and re-run."
+            echo "::error title=CPILint FAILED::$TOTAL_FAILED iFlow(s) failed and were removed."
             exit 1
           fi
 
@@ -452,11 +458,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cpilint-reports
-          path: cpilint-*.log
+          path: |
+            cpilint-*.log
+            failure-details.txt
           if-no-files-found: ignore
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 3: Postman (test/ folder + missing coverage removal + fail)
+  # JOB 3: Postman (test/ folder + coverage removal + failure details)
   # ═══════════════════════════════════════════════════════════════
   run-postman:
     name: Postman collection tests
@@ -511,6 +519,7 @@ jobs:
           TOTAL_FAILED=0
           REMOVED=""
           MISSING_COVERAGE=""
+          : > failure-details.txt
 
           # ═══ Detect + REMOVE downloaded iFlows WITHOUT a collection ═══
           echo "Checking test coverage for downloaded iFlows..."
@@ -524,9 +533,10 @@ jobs:
               echo "NO COVERAGE: '$IFLOW_ID' has no test collection - REMOVING"
               MISSING_COVERAGE="${MISSING_COVERAGE}${IFLOW_ID}; "
 
+              echo "${IFLOW_ID}|Coverage|No Postman collection found in btp-iflows/test/|Create btp-iflows/test/${IFLOW_ID}.collection.json with API tests, then re-run." >> failure-details.txt
+
               SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
               RM_DIR="$DOWNLOAD_DIR/$SAFE_ID"
-
               if [ -n "$SAFE_ID" ] && [ "$SAFE_ID" != "test" ] && [ -d "$RM_DIR" ] && [ "$RM_DIR" != "$DOWNLOAD_DIR" ]; then
                 rm -rf "$RM_DIR"
                 echo "DEBUG: Removed $RM_DIR"
@@ -588,6 +598,12 @@ jobs:
 
               if [ "$FAILED_THIS" -eq 1 ]; then
                 TOTAL_FAILED=$((TOTAL_FAILED + 1))
+
+                REASON=$(grep -iE "AssertionError|Error|Invalid URI|expected" "postman-${SAFE_ID}.log" | head -3 | tr '\n' ' ' | sed 's/|/-/g')
+                [ -z "$REASON" ] && REASON="Postman test assertion failed (see full log)"
+
+                echo "${IFLOW_ID}|Postman|${REASON}|Review the failing assertion. Check the iFlow endpoint, request payload, or expected response. Fix the iFlow or the collection.json, then re-run." >> failure-details.txt
+
                 if [ -n "$SAFE_ID" ] && [ "$SAFE_ID" != "test" ] && [ -d "$IFLOW_DIR" ] && [ "$IFLOW_DIR" != "$DOWNLOAD_DIR" ]; then
                   rm -rf "$IFLOW_DIR"
                   echo "DEBUG: Removed $IFLOW_DIR"
@@ -602,7 +618,6 @@ jobs:
           echo "DEBUG: MISSING_COVERAGE = '$MISSING_COVERAGE'"
           echo "DEBUG: REMOVED          = '$REMOVED'"
 
-          # Commit ALL removals
           if [ -n "$REMOVED" ]; then
             git add -A "$DOWNLOAD_DIR"
             git diff --staged --name-status
@@ -615,7 +630,6 @@ jobs:
             fi
           fi
 
-          # FAIL if tests failed OR coverage missing
           FAIL_PIPELINE=0
 
           if [ "$TOTAL_FAILED" -gt 0 ]; then
@@ -643,19 +657,28 @@ jobs:
           path: |
             postman-*.log
             missing-coverage.txt
+            failure-details.txt
           if-no-files-found: ignore
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 4: Send Quality Gate Report Email (always runs)
+  # JOB 4: Send Quality Gate Report Email (with failure details)
   # ═══════════════════════════════════════════════════════════════
   send-report:
     name: Send quality gate report
     needs: [download-ready-iflows, run-cpilint, run-postman]
     if: always() && needs.download-ready-iflows.outputs.skip_download != 'true'
     runs-on: ubuntu-latest
+    environment: dev
 
     steps:
-      - name: Download Postman artifacts (for coverage info)
+      - name: Download CPILint artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: cpilint-reports
+          path: cpilint-artifacts
+        continue-on-error: true
+
+      - name: Download Postman artifacts
         uses: actions/download-artifact@v4
         with:
           name: postman-reports
@@ -679,47 +702,43 @@ jobs:
           [ "$PM" = "success" ] && PM_LABEL="PASSED"
           [ "$PM" = "failure" ] && PM_LABEL="FAILED"
 
-          MISSING_COVERAGE=""
-          if [ -f "postman-artifacts/missing-coverage.txt" ]; then
-            MISSING_COVERAGE=$(cat "postman-artifacts/missing-coverage.txt" | tr -d '\n')
-          fi
-          echo "Missing coverage: ${MISSING_COVERAGE:-none}"
-
           if [ "$CP" = "success" ] && { [ "$PM" = "success" ] || [ "$PM" = "skipped" ]; }; then
             OVERALL="PASSED"; PREFIX="[PASSED]"
             ACTION_MSG="All quality gates passed. iFlows are ready for the next step."
             HEADER_COLOR="#107c10"
           else
             OVERALL="FAILED"; PREFIX="[FAILED]"
-            ACTION_MSG="ACTION REQUIRED: One or more quality gates failed. Affected iFlow(s) removed. Fix in SAP CPI, save a new version, and re-run."
+            ACTION_MSG="ACTION REQUIRED: One or more quality gates failed. Affected iFlow(s) were REMOVED. See failure details below, fix the issues in SAP CPI, save a new version, and re-run."
             HEADER_COLOR="#d13438"
           fi
 
           echo "subject=$PREFIX Quality Gate Report - $(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
 
-          COVERAGE_SECTION=""
-          if [ -n "$MISSING_COVERAGE" ]; then
-            COVERAGE_ROWS=""
-            IFS=';' read -ra ITEMS <<< "$MISSING_COVERAGE"
-            for item in "${ITEMS[@]}"; do
-              trimmed=$(echo "$item" | xargs)
-              [ -z "$trimmed" ] && continue
-              COVERAGE_ROWS="${COVERAGE_ROWS}<tr><td style='padding:8px;border:1px solid #ddd;'>${trimmed}</td><td style='padding:8px;border:1px solid #ddd;color:#f59e0b;font-weight:bold;'>REMOVED - NO TEST COLLECTION</td></tr>"
-            done
-            COVERAGE_SECTION="<div class='warn'><strong>Removed - Missing Test Coverage:</strong> The following iFlow(s) had NO test collection in the test/ folder and were REMOVED. Add a collection and re-run.</div><table><thead><tr><th>iFlow ID</th><th>Status</th></tr></thead><tbody>${COVERAGE_ROWS}</tbody></table>"
+          # Build failure detail rows from both artifacts
+          FAILURE_ROWS=""
+          for f in cpilint-artifacts/failure-details.txt postman-artifacts/failure-details.txt; do
+            [ -f "$f" ] || continue
+            while IFS='|' read -r iflow gate reason fix; do
+              [ -z "$iflow" ] && continue
+              FAILURE_ROWS="${FAILURE_ROWS}<tr><td style='padding:8px;border:1px solid #ddd;'>${iflow}</td><td style='padding:8px;border:1px solid #ddd;color:#d13438;font-weight:bold;'>${gate}</td><td style='padding:8px;border:1px solid #ddd;font-family:monospace;font-size:0.85em;'>${reason}</td><td style='padding:8px;border:1px solid #ddd;color:#0366d6;'>${fix}</td></tr>"
+            done < "$f"
+          done
+
+          FAILURE_SECTION=""
+          if [ -n "$FAILURE_ROWS" ]; then
+            FAILURE_SECTION="<h3 style='color:#d13438;'>Failure Details &amp; How to Fix</h3><table><thead><tr><th>iFlow</th><th>Gate</th><th>Why It Failed</th><th>How to Fix</th></tr></thead><tbody>${FAILURE_ROWS}</tbody></table>"
           fi
 
           cat > report.html << HTML_EOF
           <!DOCTYPE html>
           <html><head><style>
-            body { font-family: Arial, sans-serif; color: #24292e; max-width: 700px; margin: 0 auto; }
+            body { font-family: Arial, sans-serif; color: #24292e; max-width: 850px; margin: 0 auto; }
             .header { background: ${HEADER_COLOR}; color: white; padding: 25px; text-align: center; border-radius: 8px 8px 0 0; }
             .content { padding: 25px; border: 1px solid #e1e4e8; }
             table { width: 100%; border-collapse: collapse; margin: 15px 0; }
             th { background: #0366d6; color: white; padding: 10px; text-align: left; }
-            td { padding: 10px; border: 1px solid #ddd; }
+            td { padding: 10px; border: 1px solid #ddd; vertical-align: top; }
             .action { background: #fff3cd; border-left: 4px solid #f59e0b; padding: 15px; margin: 15px 0; }
-            .warn { background: #fff3cd; border-left: 4px solid #f59e0b; padding: 15px; margin: 15px 0; }
           </style></head>
           <body>
             <div class="header">
@@ -729,15 +748,19 @@ jobs:
             <div class="content">
               <p><strong>Branch:</strong> ${TARGET_BRANCH} | <strong>Time:</strong> $(date -u +'%Y-%m-%d %H:%M UTC')</p>
               <div class="action"><strong>${ACTION_MSG}</strong></div>
+
+              <h3>Quality Gate Summary</h3>
               <table>
-                <thead><tr><th>Quality Gate</th><th>Result</th></tr></thead>
+                <thead><tr><th>Gate</th><th>Result</th></tr></thead>
                 <tbody>
                   <tr><td>Gate 1: CPILint (Static Analysis)</td><td><strong>${CP_LABEL}</strong></td></tr>
                   <tr><td>Gate 2: Postman (Runtime Tests)</td><td><strong>${PM_LABEL}</strong></td></tr>
                 </tbody>
               </table>
-              ${COVERAGE_SECTION}
-              <p>Detailed per-iFlow logs are available in the workflow run artifacts.</p>
+
+              ${FAILURE_SECTION}
+
+              <p style='margin-top:20px;color:#6a737d;'>Full logs are attached as workflow artifacts (cpilint-reports, postman-reports).</p>
             </div>
           </body></html>
           HTML_EOF
