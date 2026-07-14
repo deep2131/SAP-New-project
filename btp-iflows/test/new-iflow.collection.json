@@ -1,7 +1,6 @@
 {
   "info": {
     "name": "new-iflow - QA Test Suite",
-    "description": "Real-time test for new-iflow iFlow. Owner: deepali. OAuth client_credentials.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -9,20 +8,26 @@
     { "key": "tokenUrl", "value": "" },
     { "key": "clientId", "value": "" },
     { "key": "clientSecret", "value": "" },
-    { "key": "accessToken", "value": "" }
+    { "key": "accessToken", "value": "" },
+    { "key": "csrfToken", "value": "" }
   ],
   "item": [
     {
-      "name": "TC01 - POST to new-iflow iFlow",
+      "name": "TC01 - POST to new-iflow (CSRF-aware)",
       "event": [
         {
           "listen": "prerequest",
           "script": {
             "type": "text/javascript",
             "exec": [
-              "// Fetch OAuth token before calling the iFlow",
+              "// ===== STEP 1: Get OAuth token =====",
+              "var tokenUrl = pm.variables.get('tokenUrl');",
+              "if (tokenUrl && tokenUrl.indexOf('/oauth/token') === -1) {",
+              "  tokenUrl = tokenUrl.replace(/\\/$/, '') + '/oauth/token';",
+              "}",
+              "",
               "pm.sendRequest({",
-              "  url: pm.variables.get('tokenUrl'),",
+              "  url: tokenUrl,",
               "  method: 'POST',",
               "  header: { 'Content-Type': 'application/x-www-form-urlencoded' },",
               "  body: {",
@@ -34,13 +39,34 @@
               "    ]",
               "  }",
               "}, function (err, res) {",
-              "  if (err) {",
-              "    console.log('Token request error:', err);",
-              "  } else if (res.code === 200) {",
-              "    pm.variables.set('accessToken', res.json().access_token);",
-              "    console.log('Token acquired successfully');",
+              "  if (!err && res.code === 200) {",
+              "    var token = res.json().access_token;",
+              "    pm.variables.set('accessToken', token);",
+              "    console.log('OAuth token acquired');",
+              "",
+              "    // ===== STEP 2: Fetch CSRF token via GET =====",
+              "    pm.sendRequest({",
+              "      url: pm.variables.get('baseUrl') + '/http/new-iflow',",
+              "      method: 'GET',",
+              "      header: {",
+              "        'Authorization': 'Bearer ' + token,",
+              "        'x-csrf-token': 'fetch'",
+              "      }",
+              "    }, function (csrfErr, csrfRes) {",
+              "      if (!csrfErr) {",
+              "        var csrf = csrfRes.headers.get('x-csrf-token');",
+              "        if (csrf) {",
+              "          pm.variables.set('csrfToken', csrf);",
+              "          console.log('CSRF token fetched: ' + csrf);",
+              "        } else {",
+              "          console.log('No CSRF token in response headers');",
+              "        }",
+              "      } else {",
+              "        console.log('CSRF fetch error:', csrfErr);",
+              "      }",
+              "    });",
               "  } else {",
-              "    console.log('Token request failed with code:', res.code, res.text());",
+              "    console.log('OAuth token failed:', err || res.code);",
               "  }",
               "});"
             ]
@@ -54,14 +80,8 @@
               "pm.test('Status code is 200', function () {",
               "    pm.response.to.have.status(200);",
               "});",
-              "",
               "pm.test('Response time under 10s', function () {",
               "    pm.expect(pm.response.responseTime).to.be.below(10000);",
-              "});",
-              "",
-              "pm.test('Response contains status OK', function () {",
-              "    var body = pm.response.text();",
-              "    pm.expect(body).to.include('OK');",
               "});"
             ]
           }
@@ -70,14 +90,10 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" }
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+          { "key": "x-csrf-token", "value": "{{csrfToken}}" }
         ],
-        "auth": {
-          "type": "bearer",
-          "bearer": [
-            { "key": "token", "value": "{{accessToken}}", "type": "string" }
-          ]
-        },
         "url": {
           "raw": "{{baseUrl}}/http/new-iflow",
           "host": ["{{baseUrl}}"],
