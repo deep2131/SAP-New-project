@@ -1,0 +1,89 @@
+{
+  "info": {
+    "name": "poc-iflow - QA Test Suite",
+    "description": "POC test for poc-iflow. Owner: deepali. Package: DemoIntegrationPackage",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://postman-echo.com",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "TC01 - Happy Path: GET succeeds",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/get?iflow=poc-iflow",
+          "host": ["{{baseUrl}}"],
+          "path": ["get"],
+          "query": [
+            { "key": "iflow", "value": "poc-iflow" }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status code is 200', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Response time under 5s', function () {",
+              "    pm.expect(pm.response.responseTime).to.be.below(5000);",
+              "});",
+              "",
+              "pm.test('Echo returns query param', function () {",
+              "    var json = pm.response.json();",
+              "    pm.expect(json.args.iflow).to.eql('poc-iflow');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "TC02 - POST with payload",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/post",
+          "host": ["{{baseUrl}}"],
+          "path": ["post"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\"orderId\": \"TEST-001\", \"amount\": 100}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status code is 200', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Payload echoed correctly', function () {",
+              "    var json = pm.response.json();",
+              "    pm.expect(json.data.orderId).to.eql('TEST-001');",
+              "});"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
