@@ -1,32 +1,51 @@
 {
   "info": {
     "name": "new-iflow - QA Test Suite",
-    "description": "POC test for new-iflow. Owner: deepali. Package: DemoIntegrationPackage",
+    "description": "Real-time test for new-iflow iFlow. Owner: deepali. OAuth client_credentials.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    {
-      "key": "baseUrl",
-      "value": "https://postman-echo.com",
-      "type": "string"
-    }
+    { "key": "baseUrl", "value": "" },
+    { "key": "tokenUrl", "value": "" },
+    { "key": "clientId", "value": "" },
+    { "key": "clientSecret", "value": "" },
+    { "key": "accessToken", "value": "" }
   ],
   "item": [
     {
-      "name": "TC01 - Happy Path: GET succeeds",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/get?iflow=new-iflow",
-          "host": ["{{baseUrl}}"],
-          "path": ["get"],
-          "query": [
-            { "key": "iflow", "value": "new-iflow" }
-          ]
-        }
-      },
+      "name": "TC01 - POST to new-iflow iFlow",
       "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Fetch OAuth token before calling the iFlow",
+              "pm.sendRequest({",
+              "  url: pm.variables.get('tokenUrl'),",
+              "  method: 'POST',",
+              "  header: { 'Content-Type': 'application/x-www-form-urlencoded' },",
+              "  body: {",
+              "    mode: 'urlencoded',",
+              "    urlencoded: [",
+              "      { key: 'grant_type', value: 'client_credentials' },",
+              "      { key: 'client_id', value: pm.variables.get('clientId') },",
+              "      { key: 'client_secret', value: pm.variables.get('clientSecret') }",
+              "    ]",
+              "  }",
+              "}, function (err, res) {",
+              "  if (err) {",
+              "    console.log('Token request error:', err);",
+              "  } else if (res.code === 200) {",
+              "    pm.variables.set('accessToken', res.json().access_token);",
+              "    console.log('Token acquired successfully');",
+              "  } else {",
+              "    console.log('Token request failed with code:', res.code, res.text());",
+              "  }",
+              "});"
+            ]
+          }
+        },
         {
           "listen": "test",
           "script": {
@@ -36,54 +55,39 @@
               "    pm.response.to.have.status(200);",
               "});",
               "",
-              "pm.test('Response time under 5s', function () {",
-              "    pm.expect(pm.response.responseTime).to.be.below(5000);",
+              "pm.test('Response time under 10s', function () {",
+              "    pm.expect(pm.response.responseTime).to.be.below(10000);",
               "});",
               "",
-              "pm.test('Echo returns query param', function () {",
-              "    var json = pm.response.json();",
-              "    pm.expect(json.args.iflow).to.eql('new-iflow');",
+              "pm.test('Response contains status OK', function () {",
+              "    var body = pm.response.text();",
+              "    pm.expect(body).to.include('OK');",
               "});"
             ]
           }
         }
-      ]
-    },
-    {
-      "name": "TC02 - POST with payload",
+      ],
       "request": {
         "method": "POST",
         "header": [
           { "key": "Content-Type", "value": "application/json" }
         ],
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            { "key": "token", "value": "{{accessToken}}", "type": "string" }
+          ]
+        },
         "url": {
-          "raw": "{{baseUrl}}/post",
+          "raw": "{{baseUrl}}/http/new-iflow",
           "host": ["{{baseUrl}}"],
-          "path": ["post"]
+          "path": ["http", "new-iflow"]
         },
         "body": {
           "mode": "raw",
-          "raw": "{\"orderId\": \"TEST-001\", \"amount\": 100}"
+          "raw": "{\"test\": \"data\"}"
         }
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('Status code is 200', function () {",
-              "    pm.response.to.have.status(200);",
-              "});",
-              "",
-              "pm.test('Payload echoed correctly', function () {",
-              "    var json = pm.response.json();",
-              "    pm.expect(json.data.orderId).to.eql('TEST-001');",
-              "});"
-            ]
-          }
-        }
-      ]
+      }
     }
   ]
 }
