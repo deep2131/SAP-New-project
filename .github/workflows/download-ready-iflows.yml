@@ -524,8 +524,15 @@ jobs:
           CPI_TOKEN_URL: ${{ secrets.CPI_RUNTIME_TOKEN_URL }}            
           CPI_CLIENT_ID: ${{ secrets.CPI_RUNTIME_CLIENT_ID }}    
           CPI_CLIENT_SECRET: ${{ secrets.CPI_RUNTIME_CLIENT_SECRET }}  
-
+          
         run: |
+          echo "CPI_DEV_ENDPOINT       : $([ -n "$EP" ] && echo "SET (len ${#EP})" || echo "EMPTY ❌")"
+          echo "CPI_RUNTIME_TOKEN_URL  : $([ -n "$TU" ] && echo "SET (len ${#TU})" || echo "EMPTY ❌")"
+          echo "CPI_RUNTIME_CLIENT_ID  : $([ -n "$CI" ] && echo "SET (len ${#CI})" || echo "EMPTY ❌")"
+          echo "CPI_RUNTIME_CLIENT_SECRET: $([ -n "$CS" ] && echo "SET (len ${#CS})" || echo "EMPTY ❌")"
+
+
+        
           set -uo pipefail
 
           COLLECTIONS_DIR="$DOWNLOAD_DIR/test"
