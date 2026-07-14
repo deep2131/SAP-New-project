@@ -527,12 +527,6 @@ jobs:
           
         run: |
           set -uo pipefail
-          
-          echo "CPI_DEV_ENDPOINT : $([ -n "$CPI_DEV_ENDPOINT" ] && echo "SET (len ${#CPI_DEV_ENDPOINT})" || echo "EMPTY ❌")"
-          echo "CPI_TOKEN_URL    : $([ -n "$CPI_TOKEN_URL" ] && echo "SET (len ${#CPI_TOKEN_URL})" || echo "EMPTY ❌")"
-          echo "CPI_CLIENT_ID    : $([ -n "$CPI_CLIENT_ID" ] && echo "SET (len ${#CPI_CLIENT_ID})" || echo "EMPTY ❌")"
-          echo "CPI_CLIENT_SECRET: $([ -n "$CPI_CLIENT_SECRET" ] && echo "SET (len ${#CPI_CLIENT_SECRET})" || echo "EMPTY ❌")"
-
           COLLECTIONS_DIR="$DOWNLOAD_DIR/test"
           TOTAL_FAILED=0
           REMOVED=""
@@ -599,12 +593,7 @@ jobs:
             FAILED_THIS=0
 
             set +e
-            postman collection run "$collection" \
-              --env-var "baseUrl=$CPI_DEV_ENDPOINT" \ 
-              --env-var "tokenUrl=$CPI_TOKEN_URL" \
-              --env-var "clientId=$CPI_CLIENT_ID" \
-              --env-var "clientSecret=$CPI_CLIENT_SECRET" \
-              > "postman-${SAFE_ID}.log" 2>&1
+            postman collection run "$collection" --env-var "baseUrl=$CPI_DEV_ENDPOINT" --env-var "tokenUrl=$CPI_TOKEN_URL" --env-var "clientId=$CPI_CLIENT_ID" --env-var "clientSecret=$CPI_CLIENT_SECRET" > "postman-${SAFE_ID}.log" 2>&1
             POSTMAN_EXIT=$?
             set -e
 
