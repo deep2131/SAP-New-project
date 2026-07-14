@@ -521,6 +521,10 @@ jobs:
         shell: bash
         env:
           CPI_DEV_ENDPOINT: ${{ secrets.CPI_DEV_ENDPOINT }}
+          CPI_TOKEN_URL: ${{ secrets.SAP_BTP_TOKEN_URL }}            
+          CPI_CLIENT_ID: ${{ secrets.SAP_BTP_OAUTH_CLIENT_ID }}    
+          CPI_CLIENT_SECRET: ${{ secrets.SAP_BTP_OAUTH_CLIENT_SECRET }}  
+
         run: |
           set -uo pipefail
 
