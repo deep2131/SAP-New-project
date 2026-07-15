@@ -503,13 +503,14 @@ jobs:
             failure-details.txt
           if-no-files-found: ignore
 
-  # ═══════════════════════════════════════════════════════════════
-  # JOB 4: Send Quality Gate Report Email (with failure details)
+ # ═══════════════════════════════════════════════════════════════
+  # JOB 4: Send Report — ONLY for CPILint/Postman results
   # ═══════════════════════════════════════════════════════════════
   send-report:
     name: Send quality gate report
-    needs: [download-ready-iflows, run-cpilint, run-postman]
-    if: always() && needs.download-ready-iflows.outputs.skip_download != 'true'
+    needs: [run-cpilint, run-postman]
+    # Only runs when CPILint actually ran (pass/fail) - NOT for download-only issues
+    if: always() && (needs.run-cpilint.result == 'success' || needs.run-cpilint.result == 'failure')
     runs-on: ubuntu-latest
     environment: dev
 
@@ -533,12 +534,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           CP="${{ needs.run-cpilint.result }}"
           PM="${{ needs.run-postman.result }}"
-
-          echo "CPILint job status : $CP"
-          echo "Postman job status : $PM"
 
           CP_LABEL=$([ "$CP" = "success" ] && echo "PASSED" || echo "FAILED")
           PM_LABEL="SKIPPED"
@@ -547,11 +544,11 @@ jobs:
 
           if [ "$CP" = "success" ] && { [ "$PM" = "success" ] || [ "$PM" = "skipped" ]; }; then
             OVERALL="PASSED"; PREFIX="[PASSED]"
-            ACTION_MSG="All quality gates passed. iFlows are ready for the next step."
+            ACTION_MSG="All quality gates passed. iFlows are ready."
             HEADER_COLOR="#107c10"
           else
             OVERALL="FAILED"; PREFIX="[FAILED]"
-            ACTION_MSG="ACTION REQUIRED: One or more quality gates failed. Affected iFlow(s) were REMOVED. See failure details below, fix the issues in SAP CPI, save a new version, and re-run."
+            ACTION_MSG="ACTION REQUIRED: Quality gate(s) failed. Affected iFlow(s) removed. See details, fix, save new version, re-run."
             HEADER_COLOR="#d13438"
           fi
 
@@ -575,7 +572,7 @@ jobs:
           <!DOCTYPE html>
           <html><head><style>
             body { font-family: Arial, sans-serif; color: #24292e; max-width: 850px; margin: 0 auto; }
-            .header { background: ${HEADER_COLOR}; color: white; padding: 25px; text-align: center; border-radius: 8px 8px 0 0; }
+            .header { background: ${HEADER_COLOR}; color: white; padding: 25px; text-align: center; }
             .content { padding: 25px; border: 1px solid #e1e4e8; }
             table { width: 100%; border-collapse: collapse; margin: 15px 0; }
             th { background: #0366d6; color: white; padding: 10px; text-align: left; }
@@ -583,14 +580,10 @@ jobs:
             .action { background: #fff3cd; border-left: 4px solid #f59e0b; padding: 15px; margin: 15px 0; }
           </style></head>
           <body>
-            <div class="header">
-              <h1>CI/CD Quality Gate Report</h1>
-              <h2>Overall: ${OVERALL}</h2>
-            </div>
+            <div class="header"><h1>CI/CD Quality Gate Report</h1><h2>Overall: ${OVERALL}</h2></div>
             <div class="content">
               <p><strong>Branch:</strong> ${TARGET_BRANCH} | <strong>Time:</strong> $(date -u +'%Y-%m-%d %H:%M UTC')</p>
               <div class="action"><strong>${ACTION_MSG}</strong></div>
-
               <h3>Quality Gate Summary</h3>
               <table>
                 <thead><tr><th>Gate</th><th>Result</th></tr></thead>
@@ -599,10 +592,8 @@ jobs:
                   <tr><td>Gate 2: Postman (Runtime Tests)</td><td><strong>${PM_LABEL}</strong></td></tr>
                 </tbody>
               </table>
-
               ${FAILURE_SECTION}
-
-              <p style='margin-top:20px;color:#6a737d;'>Full logs are attached as workflow artifacts (cpilint-reports, postman-reports).</p>
+              <p style='color:#6a737d;'>Full logs in workflow artifacts.</p>
             </div>
           </body></html>
           HTML_EOF
