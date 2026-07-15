@@ -723,10 +723,16 @@ jobs:
       - name: Create per-iFlow PRs
         id: create_prs
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+          DEVELOP_BRANCH: ${{ env.DEVELOP_BRANCH }}
+          TARGET_BRANCH: ${{ env.TARGET_BRANCH }}
+          DOWNLOAD_DIR: ${{ env.DOWNLOAD_DIR }}   
         shell: bash
         run: |
           set -uo pipefail
+          DEVELOP_BRANCH="${DEVELOP_BRANCH:-develop}"
+          TARGET_BRANCH="${TARGET_BRANCH:-feature}"
+          DOWNLOAD_DIR="${DOWNLOAD_DIR:-btp-iflows}"
 
           NEW_ZIPS=$(git diff --name-only --diff-filter=A HEAD^ HEAD -- "$DOWNLOAD_DIR/**/*.zip" 2>/dev/null || true)
 
@@ -822,9 +828,14 @@ jobs:
       - name: Prepare approval email
         if: steps.create_prs.outputs.prs_created == 'true'
         id: email
+        env:
+          DEVELOP_BRANCH: ${{ env.DEVELOP_BRANCH }}
+          TARGET_BRANCH: ${{ env.TARGET_BRANCH }}
         shell: bash
         run: |
           set -euo pipefail
+          DEVELOP_BRANCH="${DEVELOP_BRANCH:-develop}"
+          TARGET_BRANCH="${TARGET_BRANCH:-feature}"
 
           ROWS=""
           COUNT=0
