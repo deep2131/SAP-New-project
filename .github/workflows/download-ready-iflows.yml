@@ -360,7 +360,7 @@ jobs:
           if-no-files-found: ignore
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 3: Postman - tests ONLY newly downloaded iFlows (git diff)
+  # JOB 3: Postman (only new iFlows, OAuth + CSRF)
   # ═══════════════════════════════════════════════════════════════
   run-postman:
     name: Postman collection tests
@@ -385,32 +385,16 @@ jobs:
       - name: Install Postman CLI
         shell: bash
         run: |
-          set -euo pipefail
-          echo "Installing official Postman CLI..."
           curl -o- "https://dl-cli.pstmn.io/install/linux64.sh" | sh
           echo "Postman CLI: $(postman --version)"
-
-      - name: Login to Postman CLI
-        shell: bash
-        env:
-          POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${POSTMAN_API_KEY:-}" ]; then
-            echo "::warning::POSTMAN_API_KEY not set - running in local mode only"
-          else
-            postman login --with-api-key "$POSTMAN_API_KEY"
-            echo "Logged in to Postman CLI"
-          fi
 
       - name: Run Postman and remove failures/uncovered
         shell: bash
         env:
           CPI_DEV_ENDPOINT: ${{ secrets.CPI_DEV_ENDPOINT }}
-          CPI_TOKEN_URL: ${{ secrets.CPI_RUNTIME_TOKEN_URL }}            
-          CPI_CLIENT_ID: ${{ secrets.CPI_RUNTIME_CLIENT_ID }}    
-          CPI_CLIENT_SECRET: ${{ secrets.CPI_RUNTIME_CLIENT_SECRET }}  
-          
+          CPI_TOKEN_URL: ${{ secrets.CPI_RUNTIME_TOKEN_URL }}
+          CPI_CLIENT_ID: ${{ secrets.CPI_RUNTIME_CLIENT_ID }}
+          CPI_CLIENT_SECRET: ${{ secrets.CPI_RUNTIME_CLIENT_SECRET }}
         run: |
           set -uo pipefail
           COLLECTIONS_DIR="$DOWNLOAD_DIR/test"
@@ -420,15 +404,9 @@ jobs:
           : > failure-details.txt
           echo "" > missing-coverage.txt
 
-          # Detect ONLY newly added iFlow ZIPs in the latest commit
           NEW_ZIPS=$(git diff --name-only --diff-filter=A HEAD^ HEAD -- "$DOWNLOAD_DIR/**/*.zip" 2>/dev/null || true)
+          [ -z "$NEW_ZIPS" ] && { echo "No new iFlows to test."; exit 0; }
 
-          if [ -z "$NEW_ZIPS" ]; then
-            echo "No newly added iFlows in latest commit - nothing to test."
-            exit 0
-          fi
-
-          # Unique new iFlow IDs
           NEW_IDS=$(echo "$NEW_ZIPS" | while read -r z; do
             [ -z "$z" ] && continue
             basename "$(dirname "$(dirname "$z")")"
@@ -437,17 +415,15 @@ jobs:
           echo "Newly downloaded iFlows to test:"
           echo "$NEW_IDS"
 
-          # ═══ Coverage check on NEW iFlows only ═══
+          # Coverage check
           echo "Checking test coverage..."
           while IFS= read -r IFLOW_ID; do
             [ -z "$IFLOW_ID" ] && continue
             [ "$IFLOW_ID" = "test" ] && continue
-
             if [ ! -f "$COLLECTIONS_DIR/${IFLOW_ID}.collection.json" ]; then
-              echo "NO COVERAGE: '$IFLOW_ID' has no test collection - REMOVING"
+              echo "NO COVERAGE: '$IFLOW_ID' - REMOVING"
               MISSING_COVERAGE="${MISSING_COVERAGE}${IFLOW_ID}; "
-              echo "${IFLOW_ID}|Coverage|No Postman collection found in btp-iflows/test/|Create btp-iflows/test/${IFLOW_ID}.collection.json with API tests, then re-run." >> failure-details.txt
-
+              echo "${IFLOW_ID}|Coverage|No Postman collection in btp-iflows/test/|Create btp-iflows/test/${IFLOW_ID}.collection.json, then re-run." >> failure-details.txt
               SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
               RM_DIR="$DOWNLOAD_DIR/$SAFE_ID"
               if [ -n "$SAFE_ID" ] && [ "$SAFE_ID" != "test" ] && [ -d "$RM_DIR" ] && [ "$RM_DIR" != "$DOWNLOAD_DIR" ]; then
@@ -459,23 +435,17 @@ jobs:
 
           echo "${MISSING_COVERAGE}" > missing-coverage.txt
 
-          # ═══ Run Postman for NEW iFlows that HAVE a collection ═══
+          # Run tests
           while IFS= read -r IFLOW_ID; do
             [ -z "$IFLOW_ID" ] && continue
             [ "$IFLOW_ID" = "test" ] && continue
-
             collection="$COLLECTIONS_DIR/${IFLOW_ID}.collection.json"
             [ -f "$collection" ] || continue
-
             SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
             IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
-
-            # Skip if already removed by coverage check
             [ ! -d "$IFLOW_DIR" ] && continue
 
-            echo "════════════════════════════════════════"
             echo "Testing: $IFLOW_ID"
-
             FAILED_THIS=0
 
             set +e
@@ -495,57 +465,34 @@ jobs:
 
             if [ "$FAILED_THIS" -eq 1 ]; then
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
-
-              REASON=$(grep -iE "AssertionError|Error|Invalid URI|expected" "postman-${SAFE_ID}.log" | head -3 | tr '\n' ' ' | sed 's/|/-/g')
-              [ -z "$REASON" ] && REASON="Postman test assertion failed (see full log)"
-
-              echo "${IFLOW_ID}|Postman|${REASON}|Review the failing assertion. Check the iFlow endpoint, request payload, or expected response. Fix the iFlow or the collection.json, then re-run." >> failure-details.txt
-
+              REASON=$(grep -iE "AssertionError|Error|Invalid URI|Forbidden|Not Found|expected" "postman-${SAFE_ID}.log" | head -3 | tr '\n' ' ' | sed 's/|/-/g')
+              [ -z "$REASON" ] && REASON="Postman test failed (see full log)"
+              echo "${IFLOW_ID}|Postman|${REASON}|Check the iFlow endpoint, payload, auth, and expected response. Fix iFlow or collection, re-run." >> failure-details.txt
               if [ -n "$SAFE_ID" ] && [ "$SAFE_ID" != "test" ] && [ -d "$IFLOW_DIR" ] && [ "$IFLOW_DIR" != "$DOWNLOAD_DIR" ]; then
                 rm -rf "$IFLOW_DIR"
-                echo "DEBUG: Removed $IFLOW_DIR"
                 REMOVED="${REMOVED}${IFLOW_ID} (test-fail); "
               fi
             fi
           done <<< "$NEW_IDS"
 
-          echo "════════════════════════════════════════"
-          echo "DEBUG: TOTAL_FAILED     = $TOTAL_FAILED"
-          echo "DEBUG: MISSING_COVERAGE = '$MISSING_COVERAGE'"
-          echo "DEBUG: REMOVED          = '$REMOVED'"
-
           if [ -n "$REMOVED" ]; then
             git add -A "$DOWNLOAD_DIR"
-            git diff --staged --name-status
             if ! git diff --staged --quiet; then
               git commit -m "Remove failed/uncovered iFlows - run ${{ github.run_id }}"
               git fetch origin "$TARGET_BRANCH"
               git pull --rebase origin "$TARGET_BRANCH"
               git push origin "$TARGET_BRANCH"
-              echo "DEBUG: PUSH SUCCESSFUL"
             fi
           fi
 
           FAIL_PIPELINE=0
+          [ "$TOTAL_FAILED" -gt 0 ] && { echo "::error::Postman: $TOTAL_FAILED failed"; FAIL_PIPELINE=1; }
+          [ -n "$MISSING_COVERAGE" ] && { echo "::error::Missing coverage: $MISSING_COVERAGE"; FAIL_PIPELINE=1; }
+          [ "$FAIL_PIPELINE" -eq 1 ] && exit 1
 
-          if [ "$TOTAL_FAILED" -gt 0 ]; then
-            echo "::error title=Postman FAILED::$TOTAL_FAILED iFlow(s) failed tests and were removed."
-            FAIL_PIPELINE=1
-          fi
+          echo "All passed tests and have coverage"
 
-          if [ -n "$MISSING_COVERAGE" ]; then
-            echo "::error title=Missing Coverage::iFlow(s) without test collection were removed: $MISSING_COVERAGE"
-            FAIL_PIPELINE=1
-          fi
-
-          if [ "$FAIL_PIPELINE" -eq 1 ]; then
-            echo "Pipeline failing - report will be sent, PR will NOT be created."
-            exit 1
-          fi
-
-          echo "All newly downloaded iFlows passed tests and have coverage"
-
-      - name: Upload Postman reports and coverage
+      - name: Upload Postman reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
