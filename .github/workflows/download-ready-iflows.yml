@@ -27,7 +27,7 @@ jobs:
   # JOB 1: Download iFlows from SAP CPI
   # ═══════════════════════════════════════════════════════════════
   download-ready-iflows:
-    name: Download X.Y.Z.ReadyForDeployment iFlows
+    name: Download X.Y.Z.ReadyForDeployment iFlows from SAP CPI
     runs-on: ubuntu-latest
     environment: dev
 
@@ -41,7 +41,7 @@ jobs:
           ref: ${{ env.TARGET_BRANCH }}
           fetch-depth: 0
 
-      - name: Validate secrets & setup Git
+      - name: Validate configuration and secrets
         shell: bash
         env:
           SAP_BTP_TOKEN_URL: ${{ secrets.SAP_BTP_TOKEN_URL }}
@@ -50,6 +50,11 @@ jobs:
           SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
         run: |
           set -euo pipefail
+
+          echo "Configuration"
+          echo "Target branch     : $TARGET_BRANCH"
+          echo "Deployment marker : $DEPLOYMENT_MARKER"
+          echo "Download dir      : $DOWNLOAD_DIR"
 
           check_secret() {
             local name="$1" value="$2" prefix="${3:-}"
@@ -63,14 +68,20 @@ jobs:
             fi
           }
 
-          check_secret "SAP_BTP_TOKEN_URL" "$SAP_BTP_TOKEN_URL"
+          check_secret "SAP_BTP_TOKEN_URL" "$SAP_BTP_TOKEN_URL" "https://"
           check_secret "SAP_BTP_OAUTH_CLIENT_ID" "$SAP_BTP_OAUTH_CLIENT_ID"
           check_secret "SAP_BTP_OAUTH_CLIENT_SECRET" "$SAP_BTP_OAUTH_CLIENT_SECRET"
-          check_secret "SAP_CPI_API_BASE_URL" "$SAP_CPI_API_BASE_URL"
+          check_secret "SAP_CPI_API_BASE_URL" "$SAP_CPI_API_BASE_URL" "https://"
 
+          echo "All secrets validated."
+
+      - name: Setup Git
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          echo "Validated. Branch: $TARGET_BRANCH"
+          echo "Git configured. On branch: $TARGET_BRANCH"
 
       - name: Get SAP BTP OAuth token
         shell: bash
@@ -80,10 +91,14 @@ jobs:
           SAP_BTP_OAUTH_CLIENT_SECRET: ${{ secrets.SAP_BTP_OAUTH_CLIENT_SECRET }}
         run: |
           set -euo pipefail
+
           TOKEN_URL="${SAP_BTP_TOKEN_URL%/}"
           [ "${TOKEN_URL%/oauth/token}" = "$TOKEN_URL" ] && TOKEN_URL="$TOKEN_URL/oauth/token"
 
-          RESPONSE=$(curl -sS -w "\nHTTP_CODE=%{http_code}" \
+          echo "Requesting SAP OAuth token..."
+
+          RESPONSE=$(curl -sS \
+            -w "\nHTTP_CODE=%{http_code}" \
             -X POST "$TOKEN_URL" \
             -u "$SAP_BTP_OAUTH_CLIENT_ID:$SAP_BTP_OAUTH_CLIENT_SECRET" \
             -H "Content-Type: application/x-www-form-urlencoded" \
@@ -91,70 +106,107 @@ jobs:
 
           HTTP_CODE=$(echo "$RESPONSE" | sed -n 's/^HTTP_CODE=//p')
           BODY=$(echo "$RESPONSE" | sed '/^HTTP_CODE=/d')
-          [ "$HTTP_CODE" != "200" ] && { echo "Token failed ($HTTP_CODE)"; echo "$BODY"; exit 1; }
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Token request failed (HTTP $HTTP_CODE)"
+            echo "$BODY"
+            exit 1
+          fi
 
           TOKEN=$(echo "$BODY" | jq -r '.access_token // empty')
-          [ -z "$TOKEN" ] && { echo "No token"; exit 1; }
+          [ -z "$TOKEN" ] && { echo "No access_token in response"; exit 1; }
 
           echo "::add-mask::$TOKEN"
           echo "SAP_ACCESS_TOKEN=$TOKEN" >> "$GITHUB_ENV"
           echo "Token obtained."
 
-      - name: Discover matching iFlows
+      - name: Discover matching iFlows from SAP CPI
         shell: bash
         env:
           SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
         run: |
           set -euo pipefail
+
           API_BASE="${SAP_CPI_API_BASE_URL%/}"
           mkdir -p "$DOWNLOAD_DIR"
 
           cpi_get() {
-            curl -sS -w "%{http_code}" -X GET "$1" \
+            local url="$1" output="$2"
+            curl -sS -w "%{http_code}" \
+              -X GET "$url" \
               -H "Authorization: Bearer $SAP_ACCESS_TOKEN" \
-              -H "Accept: application/json" -o "$2"
+              -H "Accept: application/json" \
+              -o "$output"
           }
 
+          echo "Fetching IntegrationPackages..."
           HTTP_CODE=$(cpi_get "$API_BASE/api/v1/IntegrationPackages?\$format=json" packages.json)
-          [ "$HTTP_CODE" != "200" ] && { echo "Fetch failed"; cat packages.json; exit 1; }
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Failed to fetch packages (HTTP $HTTP_CODE)"
+            cat packages.json
+            exit 1
+          fi
 
           echo '{"d":{"results":[]}}' > all-artifacts.json
 
           jq -r '.d.results[]?.Id' packages.json | while read -r PKG_ID; do
             [ -z "$PKG_ID" ] || [ "$PKG_ID" = "null" ] && continue
+
             ODATA_PKG_ID=$(printf "%s" "$PKG_ID" | sed "s/'/''/g")
             PKG_FILE="pkg-$(echo "$PKG_ID" | tr -cd '[:alnum:]_.-').json"
+
             HTTP_CODE=$(cpi_get \
               "$API_BASE/api/v1/IntegrationPackages('$ODATA_PKG_ID')/IntegrationDesigntimeArtifacts?\$format=json" \
               "$PKG_FILE")
+
             if [ "$HTTP_CODE" = "200" ]; then
               jq -s '{d:{results:((.[0].d.results // []) + (.[1].d.results // []))}}' \
                 all-artifacts.json "$PKG_FILE" > merged.json
               mv merged.json all-artifacts.json
+              echo "$PKG_ID"
+            else
+              echo "Skipped $PKG_ID (HTTP $HTTP_CODE)"
             fi
           done
 
+          TOTAL=$(jq '.d.results | length' all-artifacts.json)
+          echo "Total artifacts discovered: $TOTAL"
+
           jq --arg pattern "$VERSION_REGEX" '
             [.d.results[]
-              | select(.Id != null and (.Version | type == "string") and (.Version | test($pattern)))
-              | {id: .Id, packageId: .PackageId, savedVersion: .Version}
+              | select(
+                  .Id != null
+                  and (.Version | type == "string")
+                  and (.Version | test($pattern))
+                )
+              | {
+                  id: .Id,
+                  packageId: .PackageId,
+                  savedVersion: .Version
+                }
             ]
           ' all-artifacts.json > selected-iflows.json
 
           MATCHED=$(jq length selected-iflows.json)
-          echo "Matched: $MATCHED"
-          jq -r '.[] | "\(.id) | v\(.savedVersion)"' selected-iflows.json
+          echo "iFlows matching X.Y.Z.$DEPLOYMENT_MARKER: $MATCHED"
+          jq -r '.[] | "\(.id) | \(.packageId) | v\(.savedVersion)"' selected-iflows.json
 
-          [ "$MATCHED" -eq 0 ] && echo "SKIP_DOWNLOAD=true" >> "$GITHUB_ENV"
+          if [ "$MATCHED" -eq 0 ]; then
+            echo "::notice title=No matching iFlows::No iFlows found with version X.Y.Z.$DEPLOYMENT_MARKER"
+            echo "SKIP_DOWNLOAD=true" >> "$GITHUB_ENV"
+          fi
 
       - name: Filter out already downloaded iFlows
         if: env.SKIP_DOWNLOAD != 'true'
         shell: bash
         run: |
           set -euo pipefail
+
           jq -c '.[]' selected-iflows.json > items.txt
           echo "[]" > new-iflows.json
           NEW_COUNT=0
+          EXISTING_COUNT=0
 
           while IFS= read -r item; do
             IFLOW_ID=$(echo "$item" | jq -r '.id')
@@ -163,7 +215,8 @@ jobs:
             SAFE_VER=$(echo "$VERSION" | tr -cd '[:alnum:]_.-')
 
             if [ -f "$DOWNLOAD_DIR/$SAFE_ID/$SAFE_VER/${SAFE_ID}_${SAFE_VER}.zip" ]; then
-              echo "Exists: $IFLOW_ID v$VERSION"
+              echo "Already exists: $IFLOW_ID v$VERSION"
+              EXISTING_COUNT=$((EXISTING_COUNT + 1))
             else
               echo "New: $IFLOW_ID v$VERSION"
               echo "$item" | jq -s '.' | jq -s '.[0] + .[1]' new-iflows.json - > tmp.json
@@ -173,25 +226,33 @@ jobs:
           done < items.txt
 
           mv new-iflows.json selected-iflows.json
-          echo "New: $NEW_COUNT"
-          [ "$NEW_COUNT" -eq 0 ] && echo "SKIP_DOWNLOAD=true" >> "$GITHUB_ENV"
 
-      - name: Download new iFlows
+          echo "Existing: $EXISTING_COUNT | New: $NEW_COUNT"
+
+          if [ "$NEW_COUNT" -eq 0 ]; then
+            echo "::notice title=No new iFlows::All discovered iFlows already exist in the branch."
+            echo "SKIP_DOWNLOAD=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Download new iFlows from SAP CPI
         if: env.SKIP_DOWNLOAD != 'true'
         shell: bash
         env:
           SAP_CPI_API_BASE_URL: ${{ secrets.SAP_CPI_API_BASE_URL }}
         run: |
           set -euo pipefail
+
           API_BASE="${SAP_CPI_API_BASE_URL%/}"
 
           jq -c '.[]' selected-iflows.json | while read -r item; do
             IFLOW_ID=$(echo "$item" | jq -r '.id')
             VERSION=$(echo "$item" | jq -r '.savedVersion')
+
             SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
             SAFE_VER=$(echo "$VERSION" | tr -cd '[:alnum:]_.-')
             TARGET_PATH="$DOWNLOAD_DIR/$SAFE_ID/$SAFE_VER"
             ZIP_FILE="$TARGET_PATH/${SAFE_ID}_${SAFE_VER}.zip"
+
             mkdir -p "$TARGET_PATH"
 
             ODATA_ID=$(printf "%s" "$IFLOW_ID" | sed "s/'/''/g")
@@ -199,25 +260,38 @@ jobs:
             URL="$API_BASE/api/v1/IntegrationDesigntimeArtifacts(Id='$ODATA_ID',Version='$ODATA_VER')/\$value"
 
             echo "$IFLOW_ID | v$VERSION"
-            HTTP_CODE=$(curl -sS --connect-timeout 10 --max-time 90 -w "%{http_code}" \
+
+            HTTP_CODE=$(curl -sS \
+              --connect-timeout 10 \
+              --max-time 90 \
+              -w "%{http_code}" \
               -X GET "$URL" \
               -H "Authorization: Bearer $SAP_ACCESS_TOKEN" \
-              -H "Accept: application/zip" -o "$ZIP_FILE")
+              -H "Accept: application/zip" \
+              -o "$ZIP_FILE")
 
             if [ "$HTTP_CODE" = "200" ] && [ -s "$ZIP_FILE" ]; then
-              echo "Downloaded"
+              echo "Downloaded ($HTTP_CODE)"
+
               if [ "$EXTRACT_ZIP" = "true" ]; then
                 EXTRACT_PATH="$TARGET_PATH/extracted"
-                rm -rf "$EXTRACT_PATH"; mkdir -p "$EXTRACT_PATH"
-                unzip -q "$ZIP_FILE" -d "$EXTRACT_PATH" 2>/dev/null || echo "Invalid ZIP"
+                rm -rf "$EXTRACT_PATH"
+                mkdir -p "$EXTRACT_PATH"
+                if unzip -tq "$ZIP_FILE" >/dev/null 2>&1; then
+                  unzip -q "$ZIP_FILE" -d "$EXTRACT_PATH"
+                  echo "Extracted"
+                else
+                  echo "Invalid ZIP, keeping raw file only"
+                fi
               fi
             else
               echo "Failed (HTTP $HTTP_CODE)"
-              rm -f "$ZIP_FILE"; rmdir "$TARGET_PATH" 2>/dev/null || true
+              rm -f "$ZIP_FILE"
+              rmdir "$TARGET_PATH" 2>/dev/null || true
             fi
           done
 
-          echo "Total ZIPs: $(find "$DOWNLOAD_DIR" -name "*.zip" | wc -l)"
+          echo "Total ZIPs in $DOWNLOAD_DIR: $(find "$DOWNLOAD_DIR" -name "*.zip" | wc -l)"
 
       - name: Set download outcome output
         id: set_output
@@ -231,21 +305,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           git add "$DOWNLOAD_DIR"
+
           if git diff --staged --quiet; then
-            echo "Nothing to commit"; exit 0
+            echo "::notice title=Nothing to commit::No new files were staged."
+            exit 0
           fi
+
           git commit -m "Download SAP BTP iFlows (X.Y.Z.$DEPLOYMENT_MARKER)"
+
           git fetch origin "$TARGET_BRANCH"
           if ! git pull --rebase origin "$TARGET_BRANCH"; then
-            git rebase --abort || true; exit 1
+            echo "Rebase conflict detected"
+            git rebase --abort || true
+            exit 1
           fi
+
           git push origin "$TARGET_BRANCH"
+          echo "Pushed to branch: $TARGET_BRANCH"
 
       - name: Report clean run
         if: env.SKIP_DOWNLOAD == 'true'
         shell: bash
-        run: echo "::notice::All iFlows already downloaded. Nothing new."
+        run: |
+          echo "::notice title=Success::All iFlows are already downloaded. Nothing new."
  # ═══════════════════════════════════════════════════════════════
   # JOB 2: CPILint (only new iFlows)
   # ═══════════════════════════════════════════════════════════════
