@@ -794,6 +794,12 @@ jobs:
            - Run: ${RUN_URL}
 
             Empty commit only - no files merge to ${DEVELOP_BRANCH}."
+            
+            # Create all labels (idempotent - safe every run)
+            gh label create "auto-generated" --color "ededed" 2>/dev/null || true
+            gh label create "qa-deployment" --color "0e8a16" 2>/dev/null || true
+            gh label create "needs-approval" --color "d93f0b" 2>/dev/null || true
+            gh label create "iflow:$IFLOW_ID" --color "0366d6" 2>/dev/null || true
 
             PR_URL=$(gh pr create \
               --base "$DEVELOP_BRANCH" \
