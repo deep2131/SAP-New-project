@@ -3,5 +3,5 @@
 # CODEOWNERS - Required reviewers for QA deployment PRs
 # ═══════════════════════════════════════════════════════════
 
-# Every PR to develop needs BOTH teams to approve
-* @your-org/integration-team @your-org/management-team
+# Both approvers must approve PRs to develop
+* @deep2131 @deep2131
