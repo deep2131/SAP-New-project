@@ -22,9 +22,6 @@
       <allow>OData</allow>
       <allow>SFTP</allow>
       <allow>ProcessDirect</allow>
-      <allow>AS2</allow>
-      <allow>JMS</allow>
-      <allow>AMQP</allow>
     </allowed-receiver-adapters>
 
   </rules>
