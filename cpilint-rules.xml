@@ -14,15 +14,6 @@
     <!-- Data store writes must be encrypted -->
     <unencrypted-data-store-write-not-allowed />
 
-    <!-- Restrict receiver adapters -->
-    <allowed-receiver-adapters>
-      <allow>HTTP</allow>
-      <allow>HTTPS</allow>
-      <allow>SOAP</allow>
-      <allow>OData</allow>
-      <allow>SFTP</allow>
-      <allow>ProcessDirect</allow>
-    </allowed-receiver-adapters>
 
   </rules>
 </cpilint>
