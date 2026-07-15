@@ -245,8 +245,8 @@ jobs:
         if: env.SKIP_DOWNLOAD == 'true'
         shell: bash
         run: echo "::notice::All iFlows already downloaded. Nothing new."
-  # ═══════════════════════════════════════════════════════════════
-  # JOB 2: CPILint - tests ONLY newly downloaded iFlows (git diff)
+ # ═══════════════════════════════════════════════════════════════
+  # JOB 2: CPILint (only new iFlows)
   # ═══════════════════════════════════════════════════════════════
   run-cpilint:
     name: CPILint static analysis
@@ -274,20 +274,11 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Verify rules file
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ ! -f "$CPILINT_RULES" ]; then
-            echo "::error::$CPILINT_RULES not found"
-            exit 1
-          fi
-          echo "Rules file found: $CPILINT_RULES"
-
       - name: Install CPILint
         shell: bash
         run: |
           set -euo pipefail
+          [ ! -f "$CPILINT_RULES" ] && { echo "::error::$CPILINT_RULES not found"; exit 1; }
           CPILINT_URL="https://github.com/mwittrock/cpilint/releases/download/v${CPILINT_VERSION}/cpilint-${CPILINT_VERSION}.zip"
           curl -sSL -o cpilint.zip "$CPILINT_URL"
           unzip -q cpilint.zip -d cpilint-tool
@@ -300,13 +291,8 @@ jobs:
         run: |
           set -uo pipefail
 
-          # Detect ONLY newly added iFlow ZIPs in the latest (download) commit
           NEW_ZIPS=$(git diff --name-only --diff-filter=A HEAD^ HEAD -- "$DOWNLOAD_DIR/**/*.zip" 2>/dev/null || true)
-
-          if [ -z "$NEW_ZIPS" ]; then
-            echo "No newly added iFlow ZIPs in latest commit - nothing to lint."
-            exit 0
-          fi
+          [ -z "$NEW_ZIPS" ] && { echo "No new ZIPs to lint."; exit 0; }
 
           echo "Newly downloaded iFlows to lint:"
           echo "$NEW_ZIPS"
@@ -318,13 +304,10 @@ jobs:
           while IFS= read -r zip; do
             [ -z "$zip" ] && continue
             [ ! -f "$zip" ] && continue
-
             IFLOW_ID=$(basename "$(dirname "$(dirname "$zip")")")
             VERSION=$(basename "$(dirname "$zip")")
 
-            echo "════════════════════════════════════════"
             echo "Linting: $IFLOW_ID v$VERSION"
-
             set +e
             "$CPILINT_BIN" -rules "$CPILINT_RULES" -files "$zip" > "cpilint-${IFLOW_ID}.log" 2>&1
             CPILINT_EXIT=$?
@@ -334,20 +317,15 @@ jobs:
             echo "DEBUG: CPILint exit code = $CPILINT_EXIT"
 
             if [ "$CPILINT_EXIT" -ne 0 ]; then
-              echo "DEBUG: FAILURE - removing $IFLOW_ID"
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
-
               REASON=$(grep -iE "In iflow|does not have|not allowed|issue" "cpilint-${IFLOW_ID}.log" | head -3 | tr '\n' ' ' | sed 's/|/-/g')
               [ -z "$REASON" ] && REASON="CPILint rule violation (see full log)"
-
-              echo "${IFLOW_ID} v${VERSION}|CPILint|${REASON}|Open the iFlow in SAP CPI, fix the reported rule violation, save as a NEW version, and re-run the pipeline." >> failure-details.txt
+              echo "${IFLOW_ID} v${VERSION}|CPILint|${REASON}|Fix the rule violation in SAP CPI, save as a NEW version, re-run." >> failure-details.txt
 
               SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
               IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
-
               if [ -n "$SAFE_ID" ] && [ "$SAFE_ID" != "test" ] && [ -d "$IFLOW_DIR" ] && [ "$IFLOW_DIR" != "$DOWNLOAD_DIR" ]; then
                 rm -rf "$IFLOW_DIR"
-                echo "DEBUG: Removed $IFLOW_DIR"
                 REMOVED="${REMOVED}${IFLOW_ID}; "
               fi
             else
@@ -355,28 +333,21 @@ jobs:
             fi
           done <<< "$NEW_ZIPS"
 
-          echo "════════════════════════════════════════"
-          echo "DEBUG: TOTAL_FAILED = $TOTAL_FAILED"
-          echo "DEBUG: REMOVED = '$REMOVED'"
-
           if [ -n "$REMOVED" ]; then
             git add -A "$DOWNLOAD_DIR"
-            git diff --staged --name-status
             if ! git diff --staged --quiet; then
               git commit -m "Remove CPILint-failed iFlows - run ${{ github.run_id }}"
               git fetch origin "$TARGET_BRANCH"
               git pull --rebase origin "$TARGET_BRANCH"
               git push origin "$TARGET_BRANCH"
-              echo "DEBUG: PUSH SUCCESSFUL"
             fi
           fi
 
           if [ "$TOTAL_FAILED" -gt 0 ]; then
-            echo "::error title=CPILint FAILED::$TOTAL_FAILED iFlow(s) failed and were removed."
+            echo "::error::CPILint: $TOTAL_FAILED iFlow(s) failed and were removed."
             exit 1
           fi
-
-          echo "All newly downloaded iFlows passed CPILint"
+          echo "All passed CPILint"
 
       - name: Upload CPILint reports
         if: always()
