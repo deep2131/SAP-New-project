@@ -280,7 +280,7 @@ jobs:
         run: |
           set -euo pipefail
           [ ! -f "$CPILINT_RULES" ] && { echo "::error::$CPILINT_RULES not found"; exit 1; }
-          CPILINT_URL="https://**thub.com/mwittrock/cpilint/releas**/download/v**CPILINT_VERSION}/cpilint-${CPILIN**VERSION}.zip"
+          CPILINT_URL="https://github.com/mwittrock/cpilint/releases/download/v${CPILINT_VERSION}/cpilint-${CPILINT_VERSION}.zip"
           curl -sSL -o cpilint.zip "$CPILINT_URL"
           unzip -q cpilint.zip -d cpilint-tool
           CPILINT_BIN=$(find cpilint-tool -name "cpilint" -type f | head -1)
@@ -386,7 +386,7 @@ jobs:
       - name: Install Postman CLI
         shell: bash
         run: |
-          curl -o- "https://dl-cli.pstm**io/install/linux64.sh"
+          curl -o- "https://dl-cli.pstmn.io/install/linux64.sh" | sh
           echo "Postman CLI: $(postman --version)"
 
       - name: Run Postman and remove failures/uncovered
@@ -726,7 +726,7 @@ On merge, \`deploy-to-qa\` reads \`$IFLOW_ID\` from the \`$TARGET_BRANCH\` branc
 
 - **iFlow:** \`$IFLOW_ID\`
 - **Source:** \`$TARGET_BRANCH\`
-- **Run:** https://gi**ub.com/**{ github.repository }}/actions/ru**/${{ github.run_id }} 
+- **Run:** https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
               --label "auto-generated,qa-deployment,needs-approval,iflow:$IFLOW_ID"
 
             echo " PR created for $IFLOW_ID"
