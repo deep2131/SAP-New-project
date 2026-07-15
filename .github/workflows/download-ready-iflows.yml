@@ -715,12 +715,12 @@ Source: $TARGET_BRANCH branch (iFlow remains there).
 
 Both quality gates passed:
 
-                     | Gate | Result |
+        | Gate | Result |
         |------|--------|
         |  CPILint (Static) |  PASSED |
         |  Postman (Runtime) | PASSED |
 
-**This PR contains ONLY an empty commit — no files merge to \`$DEVELOP_BRANCH\`.**
+** This PR contains ONLY an empty commit — no files merge to \`$DEVELOP_BRANCH\`.**
 
 On merge, \`deploy-to-qa\` reads \`$IFLOW_ID\` from the \`$TARGET_BRANCH\` branch.
 
