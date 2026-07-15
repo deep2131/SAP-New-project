@@ -62,10 +62,10 @@ jobs:
             fi
           }
 
-          check_secret "SAP_BTP_TOKEN_URL" "$SAP_BTP_TOKEN_URL" "https://"
+          check_secret "SAP_BTP_TOKEN_URL" "$SAP_BTP_TOKEN_URL"
           check_secret "SAP_BTP_OAUTH_CLIENT_ID" "$SAP_BTP_OAUTH_CLIENT_ID"
           check_secret "SAP_BTP_OAUTH_CLIENT_SECRET" "$SAP_BTP_OAUTH_CLIENT_SECRET"
-          check_secret "SAP_CPI_API_BASE_URL" "$SAP_CPI_API_BASE_URL" "https://"
+          check_secret "SAP_CPI_API_BASE_URL" "$SAP_CPI_API_BASE_URL"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -699,11 +699,11 @@ jobs:
 
             git commit --allow-empty -m " QA Deploy Trigger: $IFLOW_ID
 
-Quality gates PASSED (CPILint + Postman).
+           Quality gates PASSED (CPILint + Postman).
 iFlow: $IFLOW_ID
 Source: $TARGET_BRANCH branch (iFlow remains there).
 
-On merge, deploy-to-qa reads $IFLOW_ID from $TARGET_BRANCH."
+           On merge, deploy-to-qa reads $IFLOW_ID from $TARGET_BRANCH."
 
             git push origin "$TRIGGER_BRANCH"
 
@@ -715,10 +715,10 @@ On merge, deploy-to-qa reads $IFLOW_ID from $TARGET_BRANCH."
 
 Both quality gates passed:
 
-| Gate | Result |
-|------|--------|
-|  CPILint (Static) |  PASSED |
-|  Postman (Runtime) | PASSED |
+                     | Gate | Result |
+        |------|--------|
+        |  CPILint (Static) |  PASSED |
+        |  Postman (Runtime) | PASSED |
 
 **This PR contains ONLY an empty commit — no files merge to \`$DEVELOP_BRANCH\`.**
 
