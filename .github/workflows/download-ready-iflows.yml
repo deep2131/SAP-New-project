@@ -331,7 +331,7 @@ jobs:
         run: |
           echo "::notice title=Success::All iFlows are already downloaded. Nothing new."
  # ═══════════════════════════════════════════════════════════════
-  # JOB 2: CPILint 
+  # JOB 2: CPILint — runs on LATEST (new) iFlows; writes passed-list
   # ═══════════════════════════════════════════════════════════════
   run-cpilint:
     name: CPILint static analysis
@@ -371,19 +371,17 @@ jobs:
           chmod +x "$CPILINT_BIN"
           echo "CPILINT_BIN=$CPILINT_BIN" >> "$GITHUB_ENV"
 
-      - name: Run CPILint and remove failures (partial success)
+      - name: Run CPILint on latest iFlows (partial success)
+        env:
+          TARGET_BRANCH: ${{ env.TARGET_BRANCH }}
+          DOWNLOAD_DIR: ${{ env.DOWNLOAD_DIR }}
         shell: bash
         run: |
           set -uo pipefail
 
+          # Detect newly added iFlow ZIPs in the latest (download) commit
           NEW_ZIPS=$(git diff --name-only --diff-filter=A HEAD^ HEAD -- "$DOWNLOAD_DIR/**/*.zip" 2>/dev/null || true)
-          : > failure-details.txt
-          : > passed-list.txt
-
-          if [ -z "$NEW_ZIPS" ]; then
-            echo "No new ZIPs to lint."
-            exit 0
-          fi
+          [ -z "$NEW_ZIPS" ] && { echo "No new ZIPs to lint."; : > passed-list.txt; : > failure-details.txt; exit 0; }
 
           echo "Newly downloaded iFlows to lint:"
           echo "$NEW_ZIPS"
@@ -391,6 +389,8 @@ jobs:
           TOTAL_PASSED=0
           TOTAL_FAILED=0
           REMOVED=""
+          : > failure-details.txt
+          : > passed-list.txt
 
           while IFS= read -r zip; do
             [ -z "$zip" ] && continue
@@ -410,17 +410,18 @@ jobs:
             echo "DEBUG: CPILint exit code = $CPILINT_EXIT"
 
             if [ "$CPILINT_EXIT" -eq 2 ]; then
-              echo "::error::CPILint rules file invalid (exit 2). Fix cpilint-rules.xml."
+              echo "::error::CPILint rules file is invalid. Fix $CPILINT_RULES."
               exit 1
             elif [ "$CPILINT_EXIT" -eq 0 ]; then
               echo "PASSED: $IFLOW_ID"
               TOTAL_PASSED=$((TOTAL_PASSED + 1))
+              # Record iFlow that is NEW and PASSED CPILint (for Postman handoff)
               echo "${IFLOW_ID}|${VERSION}|CPILint" >> passed-list.txt
             else
               echo "FAILED: $IFLOW_ID - removing"
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
               REASON=$(grep -iE "In iflow|does not have|not allowed|issue" "cpilint-${IFLOW_ID}.log" | head -3 | tr '\n' ' ' | sed 's/|/-/g')
-              [ -z "$REASON" ] && REASON="CPILint rule violation (see log)"
+              [ -z "$REASON" ] && REASON="CPILint rule violation (see full log)"
               echo "${IFLOW_ID}|${VERSION}|CPILint|${REASON}|Fix the rule violation in SAP CPI, save as a NEW version, re-run." >> failure-details.txt
 
               SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
@@ -445,7 +446,7 @@ jobs:
             fi
           fi
 
-          # ALWAYS exit 0 - passed iFlows must continue
+          # ALWAYS exit 0 - passers continue to Postman via passed-list.txt
           echo "CPILint gate complete (partial success allowed)"
           exit 0
 
@@ -461,7 +462,7 @@ jobs:
           if-no-files-found: ignore
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 3: Postman 
+  # JOB 3: Postman — tests ONLY iFlows that passed CPILint (handoff)
   # ═══════════════════════════════════════════════════════════════
   run-postman:
     name: Postman collection tests
@@ -483,86 +484,82 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      - name: Download CPILint passed-list (handoff)
+        uses: actions/download-artifact@v4
+        with:
+          name: cpilint-reports
+          path: cpilint-artifacts
+        continue-on-error: true
+
       - name: Install Postman CLI
         shell: bash
         run: |
           curl -o- "https://dl-cli.pstmn.io/install/linux64.sh" | sh
           echo "Postman CLI: $(postman --version)"
 
-      - name: Run Postman and remove failures/uncovered (partial success)
-        shell: bash
+      - name: Run Postman on CPILint-passers only (partial success)
         env:
           CPI_DEV_ENDPOINT: ${{ secrets.CPI_DEV_ENDPOINT }}
           CPI_TOKEN_URL: ${{ secrets.CPI_RUNTIME_TOKEN_URL }}
           CPI_CLIENT_ID: ${{ secrets.CPI_RUNTIME_CLIENT_ID }}
           CPI_CLIENT_SECRET: ${{ secrets.CPI_RUNTIME_CLIENT_SECRET }}
+          TARGET_BRANCH: ${{ env.TARGET_BRANCH }}
+          DOWNLOAD_DIR: ${{ env.DOWNLOAD_DIR }}
+        shell: bash
         run: |
           set -uo pipefail
           COLLECTIONS_DIR="$DOWNLOAD_DIR/test"
           TOTAL_PASSED=0
           TOTAL_FAILED=0
           REMOVED=""
-          MISSING_COVERAGE=""
           : > failure-details.txt
           : > passed-list.txt
-          echo "" > missing-coverage.txt
 
-          NEW_ZIPS=$(git diff --name-only --diff-filter=A HEAD^ HEAD -- "$DOWNLOAD_DIR/**/*.zip" 2>/dev/null || true)
-          if [ -z "$NEW_ZIPS" ]; then
-            echo "No new iFlows to test."
+          # ═══ Read the iFlows that are NEW and PASSED CPILint ═══
+          CPILINT_PASSED="cpilint-artifacts/passed-list.txt"
+          if [ ! -f "$CPILINT_PASSED" ]; then
+            echo "No CPILint passed-list found - nothing to Postman-test."
             exit 0
           fi
 
-          NEW_IDS=$(echo "$NEW_ZIPS" | while read -r z; do
-            [ -z "$z" ] && continue
-            basename "$(dirname "$(dirname "$z")")"
-          done | sort -u)
+          NEW_IDS=$(cut -d'|' -f1 "$CPILINT_PASSED" | grep -v '^$' | sort -u)
+          if [ -z "$NEW_IDS" ]; then
+            echo "No iFlows passed CPILint - nothing to Postman-test."
+            exit 0
+          fi
 
-          echo "Newly downloaded iFlows to test:"
+          echo "iFlows that passed CPILint (to Postman-test):"
           echo "$NEW_IDS"
 
-          # Coverage check + remove uncovered
-          echo "Checking test coverage..."
           while IFS= read -r IFLOW_ID; do
             [ -z "$IFLOW_ID" ] && continue
-            [ "$IFLOW_ID" = "test" ] && continue
-            # Skip if already removed by CPILint gate
-            [ ! -d "$DOWNLOAD_DIR/$IFLOW_ID" ] && continue
 
-            if [ ! -f "$COLLECTIONS_DIR/${IFLOW_ID}.collection.json" ]; then
-              echo "NO COVERAGE: '$IFLOW_ID' - REMOVING"
-              TOTAL_FAILED=$((TOTAL_FAILED + 1))
-              MISSING_COVERAGE="${MISSING_COVERAGE}${IFLOW_ID}; "
-              VER=$(ls -1 "$DOWNLOAD_DIR/$IFLOW_ID" 2>/dev/null | head -1)
-              echo "${IFLOW_ID}|${VER}|Coverage|No Postman collection in btp-iflows/test/|Create btp-iflows/test/${IFLOW_ID}.collection.json, then re-run." >> failure-details.txt
-
-              SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
-              RM_DIR="$DOWNLOAD_DIR/$SAFE_ID"
-              if [ -n "$SAFE_ID" ] && [ "$SAFE_ID" != "test" ] && [ -d "$RM_DIR" ] && [ "$RM_DIR" != "$DOWNLOAD_DIR" ]; then
-                rm -rf "$RM_DIR"
-                REMOVED="${REMOVED}${IFLOW_ID} (no-coverage); "
-              fi
-            fi
-          done <<< "$NEW_IDS"
-
-          echo "${MISSING_COVERAGE}" > missing-coverage.txt
-
-          # Run tests for iFlows with a collection
-          while IFS= read -r IFLOW_ID; do
-            [ -z "$IFLOW_ID" ] && continue
-            [ "$IFLOW_ID" = "test" ] && continue
-            collection="$COLLECTIONS_DIR/${IFLOW_ID}.collection.json"
-            [ -f "$collection" ] || continue
             SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
             IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
-            [ ! -d "$IFLOW_DIR" ] && continue
+            collection="$COLLECTIONS_DIR/${IFLOW_ID}.collection.json"
+
+            # Safety: must still exist
+            [ ! -d "$IFLOW_DIR" ] && { echo "SKIP $IFLOW_ID (folder gone)"; continue; }
 
             VERSION=$(ls -1 "$IFLOW_DIR" 2>/dev/null | head -1)
+            [ -z "$VERSION" ] && VERSION="unknown"
 
             echo "════════════════════════════════════════"
-            echo "Testing: $IFLOW_ID"
-            FAILED_THIS=0
+            echo "Testing: $IFLOW_ID v$VERSION"
 
+            # Coverage check - no collection => remove + fail
+            if [ ! -f "$collection" ]; then
+              echo "NO COVERAGE: '$IFLOW_ID' - REMOVING"
+              TOTAL_FAILED=$((TOTAL_FAILED + 1))
+              echo "${IFLOW_ID}|${VERSION}|Coverage|No Postman collection in btp-iflows/test/|Create btp-iflows/test/${IFLOW_ID}.collection.json, then re-run." >> failure-details.txt
+              if [ -n "$SAFE_ID" ] && [ "$SAFE_ID" != "test" ] && [ -d "$IFLOW_DIR" ] && [ "$IFLOW_DIR" != "$DOWNLOAD_DIR" ]; then
+                rm -rf "$IFLOW_DIR"
+                REMOVED="${REMOVED}${IFLOW_ID} (no-coverage); "
+              fi
+              continue
+            fi
+
+            FAILED_THIS=0
             set +e
             postman collection run "$collection" --env-var "baseUrl=$CPI_DEV_ENDPOINT" --env-var "tokenUrl=$CPI_TOKEN_URL" --env-var "clientId=$CPI_CLIENT_ID" --env-var "clientSecret=$CPI_CLIENT_SECRET" > "postman-${SAFE_ID}.log" 2>&1
             POSTMAN_EXIT=$?
@@ -577,14 +574,10 @@ jobs:
               echo "${IFLOW_ID}|${VERSION}|Postman" >> passed-list.txt
             else
               echo "FAILED: $IFLOW_ID"
-              FAILED_THIS=1
-            fi
-
-            if [ "$FAILED_THIS" -eq 1 ]; then
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
               REASON=$(grep -iE "AssertionError|Error|Invalid URI|Forbidden|Not Found|expected" "postman-${SAFE_ID}.log" | head -3 | tr '\n' ' ' | sed 's/|/-/g')
               [ -z "$REASON" ] && REASON="Postman test failed (see log)"
-              echo "${IFLOW_ID}|${VERSION}|Postman|${REASON}|Check the iFlow endpoint, payload, auth, and expected response. Fix iFlow or collection, re-run." >> failure-details.txt
+              echo "${IFLOW_ID}|${VERSION}|Postman|${REASON}|Check the iFlow endpoint, payload, auth, expected response. Fix and re-run." >> failure-details.txt
               if [ -n "$SAFE_ID" ] && [ "$SAFE_ID" != "test" ] && [ -d "$IFLOW_DIR" ] && [ "$IFLOW_DIR" != "$DOWNLOAD_DIR" ]; then
                 rm -rf "$IFLOW_DIR"
                 REMOVED="${REMOVED}${IFLOW_ID} (test-fail); "
@@ -598,14 +591,14 @@ jobs:
           if [ -n "$REMOVED" ]; then
             git add -A "$DOWNLOAD_DIR"
             if ! git diff --staged --quiet; then
-              git commit -m "Remove failed/uncovered iFlows - run ${{ github.run_id }}"
+              git commit -m "Remove Postman-failed iFlows - run ${{ github.run_id }}"
               git fetch origin "$TARGET_BRANCH"
               git pull --rebase origin "$TARGET_BRANCH"
               git push origin "$TARGET_BRANCH"
             fi
           fi
 
-          # ALWAYS exit 0 - passed iFlows continue
+          # ALWAYS exit 0 - passers continue to auto-PR
           echo "Postman gate complete (partial success allowed)"
           exit 0
 
@@ -616,11 +609,9 @@ jobs:
           name: postman-reports
           path: |
             postman-*.log
-            missing-coverage.txt
             failure-details.txt
             passed-list.txt
           if-no-files-found: ignore
-
   # ═══════════════════════════════════════════════════════════════
   # JOB 4: Send Report — shows BOTH passed and failed
   # ═══════════════════════════════════════════════════════════════
