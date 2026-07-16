@@ -650,7 +650,6 @@ jobs:
         id: report
         shell: bash
         run: |
-          set -x
           set -uo pipefail
 
           # PASSED rows (only iFlows that passed BOTH gates = still exist)
@@ -673,8 +672,8 @@ jobs:
             done < "$f"
           done
 
-          PASSED_COUNT=$(echo "$PASSED_ROWS" | grep -o "<tr>" | wc -l | tr -d ' ')
-          FAILED_COUNT=$(echo "$FAILED_ROWS" | grep -o "<tr>" | wc -l | tr -d ' ')
+          PASSED_COUNT=$(echo "$PASSED_ROWS" | grep -o "<tr>" | wc -l | tr -d ' ' || true)
+          FAILED_COUNT=$(echo "$FAILED_ROWS" | grep -o "<tr>" | wc -l | tr -d ' ' || true)
 
           if [ "$FAILED_COUNT" -eq 0 ] && [ "$PASSED_COUNT" -gt 0 ]; then
             OVERALL="ALL PASSED"; HEADER_COLOR="#107c10"; PREFIX="[PASSED]"
