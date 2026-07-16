@@ -650,7 +650,8 @@ jobs:
         id: report
         shell: bash
         run: |
-          set -euo pipefail
+          set -x
+          set -uo pipefail
 
           # PASSED rows (only iFlows that passed BOTH gates = still exist)
           # A passed iFlow appears in Postman's passed-list (final gate)
