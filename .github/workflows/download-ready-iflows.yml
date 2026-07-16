@@ -811,7 +811,12 @@ jobs:
 
             git fetch origin "$DEVELOP_BRANCH"
             git checkout -B "$TRIGGER_BRANCH" "origin/$DEVELOP_BRANCH"
-            git commit --allow-empty -m "QA Deploy Trigger: $IFLOW_ID (gates passed, source: $TARGET_BRANCH)"
+            mkdir -p .qa-triggers
+            printf 'iFlow: %s\nVersion: %s\nSource: %s\nTriggered: %s\n' \
+              "$IFLOW_ID" "$VERSION" "$TARGET_BRANCH" "$(date -u +'%Y-%m-%d %H:%M UTC')" \
+              > ".qa-triggers/${SAFE_ID}.txt"
+            git add ".qa-triggers/${SAFE_ID}.txt"
+            git commit -m "QA Deploy Trigger: $IFLOW_ID (gates passed, source: $TARGET_BRANCH)"
             git push origin "$TRIGGER_BRANCH"
 
             PR_BODY=$(printf '%s\n' \
