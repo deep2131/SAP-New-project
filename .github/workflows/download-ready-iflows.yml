@@ -719,5 +719,200 @@ jobs:
           html_body: file://report.html
           from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
           to: ${{ secrets.EMAIL_DISTRIBUTION_LIST }}
+ # ═══════════════════════════════════════════════════════════════
+  # JOB 5: Auto-PR to develop
+  # ═══════════════════════════════════════════════════════════════
+  auto-pr-develop:
+    name: Auto-PR to develop
+    needs: [run-cpilint, run-postman]
+    if: needs.run-cpilint.result == 'success' && needs.run-postman.result == 'success'
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Download Postman passed-list
+        uses: actions/download-artifact@v4
+        with:
+          name: postman-reports
+          path: postman-artifacts
+        continue-on-error: true
+
+      - name: Create per-iFlow PRs for full passers
+        id: create_prs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEVELOP_BRANCH: ${{ env.DEVELOP_BRANCH }}
+          TARGET_BRANCH: ${{ env.TARGET_BRANCH }}
+          DOWNLOAD_DIR: ${{ env.DOWNLOAD_DIR }}
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          DEVELOP_BRANCH="${DEVELOP_BRANCH:-develop}"
+          TARGET_BRANCH="${TARGET_BRANCH:-feature}"
+          DOWNLOAD_DIR="${DOWNLOAD_DIR:-btp-iflows}"
+
+          PASSED_FILE="postman-artifacts/passed-list.txt"
+          if [ ! -f "$PASSED_FILE" ]; then
+            echo "No Postman passed-list - no PRs."
+            echo "prs_created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          PASSED_IDS=$(cut -d'|' -f1 "$PASSED_FILE" | grep -v '^$' | sort -u)
+          if [ -z "$PASSED_IDS" ]; then
+            echo "No fully-passed iFlows - no PRs."
+            echo "prs_created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Fully-passed iFlows eligible for PR:"
+          echo "$PASSED_IDS"
+
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          : > pr-summary.txt
+
+          # Get all open PR head branches once (for dedup without labels)
+          OPEN_HEADS=$(gh pr list --base "$DEVELOP_BRANCH" --state open --json headRefName --jq '.[].headRefName' 2>/dev/null || true)
+
+          while IFS= read -r IFLOW_ID; do
+            [ -z "$IFLOW_ID" ] && continue
+
+            SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
+
+            echo "════════════════════════════════════════"
+            echo "Processing PR for iFlow: $IFLOW_ID"
+
+            # Dedup WITHOUT labels: check if an open PR already has a
+            # head branch starting with qa-deploy/<safe-id>-
+            if echo "$OPEN_HEADS" | grep -q "^qa-deploy/${SAFE_ID}-"; then
+              echo "SKIP: An open PR branch already exists for '$IFLOW_ID'"
+              continue
+            fi
+
+            VERSION=$(ls -1 "$DOWNLOAD_DIR/$IFLOW_ID" 2>/dev/null | head -1)
+            [ -z "$VERSION" ] && VERSION="unknown"
+
+            TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+            TRIGGER_BRANCH="qa-deploy/${SAFE_ID}-${TIMESTAMP}"
+
+            git fetch origin "$DEVELOP_BRANCH"
+            git checkout -B "$TRIGGER_BRANCH" "origin/$DEVELOP_BRANCH"
+            git commit --allow-empty -m "QA Deploy Trigger: $IFLOW_ID (gates passed, source: $TARGET_BRANCH)"
+            git push origin "$TRIGGER_BRANCH"
+
+            PR_BODY=$(printf '%s\n' \
+              "## QA Deployment Trigger for ${IFLOW_ID}" \
+              "" \
+              "Both quality gates passed (CPILint + Postman)." \
+              "Requires approval from both Integration and Management teams." \
+              "" \
+              "This PR contains ONLY an empty commit - no files merge to ${DEVELOP_BRANCH}." \
+              "On merge, deploy-to-qa reads ${IFLOW_ID} from the ${TARGET_BRANCH} branch." \
+              "" \
+              "- iFlow: ${IFLOW_ID}" \
+              "- Version: ${VERSION}" \
+              "- Source: ${TARGET_BRANCH}" \
+              "- Run: ${RUN_URL}")
+
+            PR_URL=$(gh pr create \
+              --base "$DEVELOP_BRANCH" \
+              --head "$TRIGGER_BRANCH" \
+              --title "[QA Deploy] $IFLOW_ID - needs approval" \
+              --body "$PR_BODY")
+
+            PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+            echo "PR #$PR_NUMBER created: $PR_URL"
+
+            gh pr merge "$PR_NUMBER" --auto --squash --delete-branch 2>/dev/null \
+              && echo "Auto-merge enabled for #$PR_NUMBER" \
+              || echo "::warning::Could not enable auto-merge for #$PR_NUMBER"
+
+            echo "${IFLOW_ID}|${VERSION}|${PR_NUMBER}|${PR_URL}" >> pr-summary.txt
+          done <<< "$PASSED_IDS"
+
+          if [ -s pr-summary.txt ]; then
+            echo "prs_created=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prs_created=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Done processing all fully-passed iFlows."
+
+      - name: Prepare approval email
+        if: steps.create_prs.outputs.prs_created == 'true'
+        id: email
+        env:
+          DEVELOP_BRANCH: ${{ env.DEVELOP_BRANCH }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEVELOP_BRANCH="${DEVELOP_BRANCH:-develop}"
+
+          ROWS=""
+          COUNT=0
+          while IFS='|' read -r id version prnum prurl; do
+            [ -z "$id" ] && continue
+            COUNT=$((COUNT + 1))
+            ROWS="${ROWS}<tr><td style='padding:10px;border:1px solid #ddd;'>${id}</td><td style='padding:10px;border:1px solid #ddd;'>${version}</td><td style='padding:10px;border:1px solid #ddd;'>#${prnum}</td><td style='padding:10px;border:1px solid #ddd;'>${prurl}px;text-decoration:none;'>Review and Approve</a></td></tr>"
+          done < pr-summary.txt
+
+          echo "subject=[Approval Needed] ${COUNT} iFlow(s) ready for QA deployment" >> "$GITHUB_OUTPUT"
+
+          cat > approval-email.html << HTML_EOF
+          <!DOCTYPE html>
+          <html><head><style>
+            body { font-family: Arial, sans-serif; color: #24292e; max-width: 800px; margin: 0 auto; }
+            .header { background: #0366d6; color: white; padding: 25px; text-align: center; border-radius: 8px 8px 0 0; }
+            .content { padding: 25px; border: 1px solid #e1e4e8; }
+            table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+            th { background: #0366d6; color: white; padding: 10px; text-align: left; }
+            .note { background: #fff3cd; border-left: 4px solid #f59e0b; padding: 15px; margin: 15px 0; }
+          </style></head>
+          <body>
+            <div class="header">
+              <h1>Approval Required: QA Deployment</h1>
+              <h2>${COUNT} iFlow(s) passed all quality gates</h2>
+            </div>
+            <div class="content">
+              <p>Dear Approvers,</p>
+              <p>The following iFlow(s) passed CPILint and Postman tests. Approval is required before merge into <strong>${DEVELOP_BRANCH}</strong> and QA deployment. Click the link to review and approve.</p>
+              <table>
+                <thead><tr><th>iFlow</th><th>Version</th><th>PR</th><th>Action</th></tr></thead>
+                <tbody>${ROWS}</tbody>
+              </table>
+              <div class="note"><strong>Process:</strong> Once the required approvals are given on the PR, it auto-merges to ${DEVELOP_BRANCH} and QA deployment begins.</div>
+              <p style="color:#6a737d;font-size:0.9em;">Automated notification from SAP CPI CI/CD pipeline.</p>
+            </div>
+          </body></html>
+          HTML_EOF
+
+          echo "Email prepared for ${COUNT} PR(s)"
+
+      - name: Send approval email to approvers
+        if: steps.create_prs.outputs.prs_created == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: ${{ steps.email.outputs.subject }}
+          html_body: file://approval-email.html
+          from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
+          to: ${{ secrets.EMAIL_APPROVERS_LIST }}
 
  
