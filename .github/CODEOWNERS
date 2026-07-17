@@ -1,7 +1,0 @@
-
-# ═══════════════════════════════════════════════════════════
-# CODEOWNERS - Required reviewers for QA deployment PRs
-# ═══════════════════════════════════════════════════════════
-
-# Both approvers must approve PRs to develop
-* @raghav-acc @deep2131
