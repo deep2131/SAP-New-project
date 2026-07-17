@@ -767,26 +767,15 @@ jobs:
 
           PASSED_FILE="postman-artifacts/passed-list.txt"
 
-          # ── Clear message + controlled fail if NOTHING passed ──
           if [ ! -f "$PASSED_FILE" ] || [ ! -s "$PASSED_FILE" ]; then
-            echo "════════════════════════════════════════"
             echo "::error title=No iFlows passed::All iFlows failed the quality gates."
-            echo "No iFlows passed CPILint + Postman — nothing to create a PR for."
-            echo "Failed iFlows were removed. Fix the issues (see the emailed report),"
-            echo "save a new version in SAP CPI, and re-run the pipeline."
-            echo "════════════════════════════════════════"
-            echo "prs_created=false" >> "$GITHUB_OUTPUT"
-            exit 1                      # ← intentional fail with clear message
-          fi
-
-          # Safe extraction (|| true prevents grep-empty from killing under pipefail)
-          PASSED_IDS=$(cut -d'|' -f1 "$PASSED_FILE" | grep -v '^$' | sort -u || true)
-
-          if [ -z "$PASSED_IDS" ]; then
-            echo "::error title=No iFlows passed::All iFlows failed - no PR created."
+            echo "No iFlows passed CPILint + Postman - nothing to create a PR for."
             echo "prs_created=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
+
+          PASSED_IDS=$(cut -d'|' -f1 "$PASSED_FILE" | grep -v '^$' | sort -u || true)
+          [ -z "$PASSED_IDS" ] && { echo "::error::No passers"; echo "prs_created=false" >> "$GITHUB_OUTPUT"; exit 1; }
 
           echo "Fully-passed iFlows eligible for PR:"
           echo "$PASSED_IDS"
@@ -794,77 +783,95 @@ jobs:
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           : > pr-summary.txt
 
-          # Get all open PR head branches once (for dedup without labels)
+          # Snapshot open PR head branches once (for dedup)
           OPEN_HEADS=$(gh pr list --base "$DEVELOP_BRANCH" --state open --json headRefName --jq '.[].headRefName' 2>/dev/null || true)
+
+          # Make sure develop ref is available locally
+          git fetch origin "$DEVELOP_BRANCH" 2>/dev/null || true
+
+          CREATED=0
 
           while IFS= read -r IFLOW_ID; do
             [ -z "$IFLOW_ID" ] && continue
-
             SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
 
             echo "════════════════════════════════════════"
             echo "Processing PR for iFlow: $IFLOW_ID"
 
-            # Dedup WITHOUT labels: check if an open PR already has a
-            # head branch starting with qa-deploy/<safe-id>-
+            # ── Dedup: skip if an open PR branch already exists for this iFlow ──
             if echo "$OPEN_HEADS" | grep -q "^qa-deploy/${SAFE_ID}-"; then
-              echo "SKIP: An open PR branch already exists for '$IFLOW_ID'"
+              echo "SKIP: open PR branch already exists for '$IFLOW_ID'"
               continue
             fi
 
-            VERSION=$(ls -1 "$DOWNLOAD_DIR/$IFLOW_ID" 2>/dev/null | head -1)
+            VERSION=$(ls -1 "$DOWNLOAD_DIR/$SAFE_ID" 2>/dev/null | head -1)
             [ -z "$VERSION" ] && VERSION="unknown"
 
-            TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
-            TRIGGER_BRANCH="qa-deploy/${SAFE_ID}-${TIMESTAMP}"
+            # ── Isolate each iFlow's git work in a subshell ──
+            # A failure here logs a warning and continues to the next iFlow.
+            if (
+              set -e
 
-            git fetch origin "$DEVELOP_BRANCH"
-            git checkout -B "$TRIGGER_BRANCH" "origin/$DEVELOP_BRANCH"
-            mkdir -p .qa-triggers
-            printf 'iFlow: %s\nVersion: %s\nSource: %s\nTriggered: %s\n' \
-              "$IFLOW_ID" "$VERSION" "$TARGET_BRANCH" "$(date -u +'%Y-%m-%d %H:%M UTC')" \
-              > ".qa-triggers/${SAFE_ID}.txt"
-            git add ".qa-triggers/${SAFE_ID}.txt"
-            git commit -m "QA Deploy Trigger: $IFLOW_ID (gates passed, source: $TARGET_BRANCH)"
-            git push origin "$TRIGGER_BRANCH"
+              # Clean, deterministic starting point each iteration
+              git fetch origin "$DEVELOP_BRANCH"
 
-            PR_BODY=$(printf '%s\n' \
-              "## QA Deployment Trigger for ${IFLOW_ID}" \
-              "" \
-              "Both quality gates passed (CPILint + Postman)." \
-              "Requires approval from both Integration and Management teams." \
-              "" \
-              "This PR contains ONLY an empty commit - no files merge to ${DEVELOP_BRANCH}." \
-              "On merge, deploy-to-qa reads ${IFLOW_ID} from the ${TARGET_BRANCH} branch." \
-              "" \
-              "- iFlow: ${IFLOW_ID}" \
-              "- Version: ${VERSION}" \
-              "- Source: ${TARGET_BRANCH}" \
-              "- Run: ${RUN_URL}")
+              TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+              TRIGGER_BRANCH="qa-deploy/${SAFE_ID}-${TIMESTAMP}"
 
-            PR_URL=$(gh pr create \
-              --base "$DEVELOP_BRANCH" \
-              --head "$TRIGGER_BRANCH" \
-              --title "[QA Deploy] $IFLOW_ID - needs approval" \
-              --body "$PR_BODY")
+              # Create a fresh empty branch straight from origin/develop
+              # -B resets if the name exists; source is origin/develop so no
+              # leftover state from the previous iteration matters.
+              git checkout -B "$TRIGGER_BRANCH" "origin/$DEVELOP_BRANCH"
 
-            PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
-            PR_DIRECT_URL="https://github.com/${{ github.repository }}/pull/${PR_NUMBER}"
-            echo "PR #$PR_NUMBER created: $PR_DIRECT_URL"
+              git commit --allow-empty -m "QA Deploy Trigger: $IFLOW_ID (gates passed, source: $TARGET_BRANCH)"
+              git push origin "$TRIGGER_BRANCH"
 
-            gh pr merge "$PR_NUMBER" --auto --squash --delete-branch 2>/dev/null || true \
-              && echo "Auto-merge enabled for #$PR_NUMBER" \
-              || echo "::warning::Could not enable auto-merge for #$PR_NUMBER"
+              PR_BODY=$(printf '%s\n' \
+                "## QA Deployment Trigger for ${IFLOW_ID}" \
+                "" \
+                "Both quality gates passed (CPILint + Postman)." \
+                "Approval required before merge to ${DEVELOP_BRANCH}." \
+                "" \
+                "- iFlow: ${IFLOW_ID}" \
+                "- Version: ${VERSION}" \
+                "- Source: ${TARGET_BRANCH}" \
+                "- Run: ${RUN_URL}")
 
-            echo "${IFLOW_ID}|${VERSION}|${PR_NUMBER}|${PR_DIRECT_URL}" >> pr-summary.txt
+              PR_URL=$(gh pr create \
+                --base "$DEVELOP_BRANCH" \
+                --head "$TRIGGER_BRANCH" \
+                --title "[QA Deploy] $IFLOW_ID - needs approval" \
+                --body "$PR_BODY")
+
+              PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+              PR_DIRECT_URL="https://github.com/${{ github.repository }}/pull/${PR_NUMBER}"
+              echo "PR #$PR_NUMBER created: $PR_DIRECT_URL"
+
+              gh pr merge "$PR_NUMBER" --auto --squash --delete-branch 2>/dev/null \
+                && echo "Auto-merge enabled for #$PR_NUMBER" \
+                || echo "::warning::Could not enable auto-merge for #$PR_NUMBER"
+
+              # Record for the approval email (id|version|prnum|prurl)
+              echo "${IFLOW_ID}|${VERSION}|${PR_NUMBER}|${PR_DIRECT_URL}" >> pr-summary.txt
+            ); then
+              CREATED=$((CREATED + 1))
+              echo "Done: $IFLOW_ID"
+            else
+              echo "::warning title=PR creation failed::Could not create PR for '$IFLOW_ID' - continuing with the rest."
+              # Return to a safe branch so the next iteration starts clean
+              git checkout "origin/$TARGET_BRANCH" 2>/dev/null || git checkout "$TARGET_BRANCH" 2>/dev/null || true
+            fi
+
           done <<< "$PASSED_IDS"
+
+          echo "════════════════════════════════════════"
+          echo "PRs created this run: $CREATED"
 
           if [ -s pr-summary.txt ]; then
             echo "prs_created=true" >> "$GITHUB_OUTPUT"
           else
             echo "prs_created=false" >> "$GITHUB_OUTPUT"
           fi
-
           echo "Done processing all fully-passed iFlows."
 
       - name: Prepare approval email
