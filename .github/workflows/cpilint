@@ -1,0 +1,33 @@
+name: Vendor CPILint (one-time)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download + commit CPILint zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p tools
+          curl -sSL -o tools/cpilint-1.1.0.zip \
+            "https://github.com/mwittrock/cpilint/releases/download/v1.1.0/cpilint-1.1.0.zip"
+
+          ls -la tools/cpilint-1.1.0.zip
+          git add tools/cpilint-1.1.0.zip
+          git commit -m "Vendor CPILint 1.1.0"
+          git push origin feature
+          echo "CPILint zip vendored to tools/"
