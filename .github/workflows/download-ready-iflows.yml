@@ -843,10 +843,6 @@ jobs:
               PR_DIRECT_URL="https://github.com/${{ github.repository }}/pull/${PR_NUMBER}"
               echo "PR #$PR_NUMBER created: $PR_DIRECT_URL"
 
-              gh pr merge "$PR_NUMBER" --auto --squash 2>/dev/null \
-                && echo "Auto-merge enabled for #$PR_NUMBER" \
-                || echo "::warning::Could not enable auto-merge for #$PR_NUMBER"
-
               # Record for email (id|version|prnum|prurl)
               echo "${IFLOW_ID}|${VERSION}|${PR_NUMBER}|${PR_DIRECT_URL}" >> pr-summary.txt
             ); then
