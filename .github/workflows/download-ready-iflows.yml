@@ -780,10 +780,7 @@ jobs:
 
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           : > pr-summary.txt
-
-          # Snapshot open PR head branches once (for per-iFlow dedup)
-          OPEN_HEADS=$(gh pr list --base "$DEVELOP_BRANCH" --state open --json headRefName --jq '.[].headRefName' 2>/dev/null || true)
-
+      
           CREATED=0
 
           while IFS='|' read -r IFLOW_ID VERSION GATE; do
@@ -793,12 +790,6 @@ jobs:
 
             echo "════════════════════════════════════════"
             echo "Processing PR for iFlow: $IFLOW_ID (v$VERSION)"
-
-            # Dedup: skip if an open PR branch already exists for this iFlow
-            if echo "$OPEN_HEADS" | grep -q "^qa-deploy/${SAFE_ID}-"; then
-              echo "SKIP: open PR branch already exists for '$IFLOW_ID'"
-              continue
-            fi
 
             # Isolate each iFlow's git work; a failure logs a warning and continues
             if (
