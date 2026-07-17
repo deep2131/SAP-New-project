@@ -445,7 +445,13 @@ jobs:
               git push origin "$TARGET_BRANCH"
             fi
           fi
-
+          if [ "$TOTAL_PASSED" -gt 0 ]; then
+            echo "At least one iFlow passed CPILint - continuing to Postman."
+            exit 0                             
+          else
+            echo "::error title=CPILint - all failed::All iFlow(s) failed CPILint and were removed. Fix issues (see report) and re-run."
+            exit 1                             
+          fi
           # ALWAYS exit 0 - passers continue to Postman via passed-list.txt
           echo "CPILint gate complete (partial success allowed)"
           exit 0
@@ -467,7 +473,7 @@ jobs:
   run-postman:
     name: Postman collection tests
     needs: [download-ready-iflows, run-cpilint]
-    if: needs.download-ready-iflows.outputs.skip_download != 'true'
+    if: needs.download-ready-iflows.outputs.skip_download != 'true' && needs.run-cpilint.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
