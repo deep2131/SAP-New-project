@@ -720,7 +720,7 @@ jobs:
           from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
           to: ${{ vars.EMAIL_DISTRIBUTION_LIST }}
  # ═══════════════════════════════════════════════════════════════
-  # JOB 5: Auto-PR to develop
+  # JOB 5: Auto-PR to develop — trigger file + clickable email link
   # ═══════════════════════════════════════════════════════════════
   auto-pr-develop:
     name: Auto-PR to develop
@@ -768,13 +768,12 @@ jobs:
           PASSED_FILE="postman-artifacts/passed-list.txt"
           if [ ! -f "$PASSED_FILE" ] || [ ! -s "$PASSED_FILE" ]; then
             echo "::error title=No iFlows passed::All iFlows failed the quality gates."
+            echo "No iFlows passed CPILint + Postman - nothing to create a PR for."
             echo "prs_created=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
-          # ── Capture id|version pairs NOW (passed-list already has them) ──
-          # Format of passed-list.txt: IFLOW_ID|VERSION|Postman
-          # So we read version directly from the file — NO disk lookup needed!
+          # passed-list.txt format: IFLOW_ID|VERSION|Postman  (version read from file, no disk lookup)
           cp "$PASSED_FILE" pr-work.txt
           echo "Passed iFlows:"
           cut -d'|' -f1 pr-work.txt
@@ -782,11 +781,11 @@ jobs:
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           : > pr-summary.txt
 
+          # Snapshot open PR head branches once (for per-iFlow dedup)
           OPEN_HEADS=$(gh pr list --base "$DEVELOP_BRANCH" --state open --json headRefName --jq '.[].headRefName' 2>/dev/null || true)
 
           CREATED=0
 
-          # Read id + version straight from passed-list (no ls, no disk dependency)
           while IFS='|' read -r IFLOW_ID VERSION GATE; do
             [ -z "$IFLOW_ID" ] && continue
             SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
@@ -801,13 +800,26 @@ jobs:
               continue
             fi
 
+            # Isolate each iFlow's git work; a failure logs a warning and continues
             if (
               set -e
               git fetch origin "$DEVELOP_BRANCH"
+
               TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
               TRIGGER_BRANCH="qa-deploy/${SAFE_ID}-${TIMESTAMP}"
+
+              # Fresh empty branch from origin/develop
               git checkout -B "$TRIGGER_BRANCH" "origin/$DEVELOP_BRANCH"
-              git commit --allow-empty -m "QA Deploy Trigger: $IFLOW_ID (gates passed, source: $TARGET_BRANCH)"
+
+              # ── Trigger FILE (not empty commit): makes PR reviewable (Approve
+              #    button appears) AND triggers deploy-to-qa (path: .qa-triggers/**)
+              mkdir -p .qa-triggers
+              printf 'iFlow: %s\nVersion: %s\nSource: %s\nTriggered: %s\n' \
+                "$IFLOW_ID" "$VERSION" "$TARGET_BRANCH" "$(date -u +'%Y-%m-%d %H:%M UTC')" \
+                > ".qa-triggers/${SAFE_ID}.txt"
+              git add ".qa-triggers/${SAFE_ID}.txt"
+              git commit -m "QA Deploy Trigger: $IFLOW_ID (gates passed, source: $TARGET_BRANCH)"
+
               git push origin "$TRIGGER_BRANCH"
 
               PR_BODY=$(printf '%s\n' \
@@ -835,12 +847,14 @@ jobs:
                 && echo "Auto-merge enabled for #$PR_NUMBER" \
                 || echo "::warning::Could not enable auto-merge for #$PR_NUMBER"
 
+              # Record for email (id|version|prnum|prurl)
               echo "${IFLOW_ID}|${VERSION}|${PR_NUMBER}|${PR_DIRECT_URL}" >> pr-summary.txt
             ); then
               CREATED=$((CREATED + 1))
               echo "Done: $IFLOW_ID"
             else
-              echo "::warning::Could not create PR for '$IFLOW_ID' - continuing."
+              echo "::warning title=PR creation failed::Could not create PR for '$IFLOW_ID' - continuing."
+              git checkout "origin/$TARGET_BRANCH" 2>/dev/null || true
             fi
 
           done < pr-work.txt
@@ -853,7 +867,6 @@ jobs:
           else
             echo "prs_created=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "Done processing all fully-passed iFlows."
 
       - name: Prepare approval email
         if: steps.create_prs.outputs.prs_created == 'true'
@@ -867,23 +880,24 @@ jobs:
 
           ROWS=""
           COUNT=0
+          # pr-summary.txt: IFLOW_ID|VERSION|PR_NUMBER|PR_URL
           while IFS='|' read -r id version prnum prurl; do
             [ -z "$id" ] && continue
             COUNT=$((COUNT + 1))
-            ROWS="${ROWS}<tr><td style='padding:10px;border:1px solid #ddd;'>${id}</td><td style='padding:10px;border:1px solid #ddd;'>${version}</td><td style='padding:10px;border:1px solid #ddd;'>Review and Approve</td></tr>"
+            ROWS="${ROWS}<tr><td style='padding:10px;border:1px solid #ddd;'>${id}</td><td style='padding:10px;border:1px solid #ddd;'>${version}</td><td style='padding:10px;border:1px solid #ddd;'><a href=\"${prurl}\" style='color:#0366d6;font-weight:bold;text-decoration:none;'>Review and Approve</a></td></tr>"
           done < pr-summary.txt
 
           echo "subject=[Approval Needed] ${COUNT} iFlow(s) ready for QA deployment" >> "$GITHUB_OUTPUT"
 
-          cat > approval-email.html << HTML_EOF
+          cat > approval-email.html <<HTML_EOF
           <!DOCTYPE html>
           <html><head><style>
-            body { font-family: Arial, sans-serif; color: #24292e; max-width: 800px; margin: 0 auto; }
-            .header { background: #0366d6; color: white; padding: 25px; text-align: center; border-radius: 8px 8px 0 0; }
-            .content { padding: 25px; border: 1px solid #e1e4e8; }
-            table { width: 100%; border-collapse: collapse; margin: 15px 0; }
-            th { background: #0366d6; color: white; padding: 10px; text-align: left; }
-            .note { background: #fff3cd; border-left: 4px solid #f59e0b; padding: 15px; margin: 15px 0; }
+            body { font-family: Arial, sans-serif; color:#24292e; max-width:800px; margin:0 auto; }
+            .header { background:#0366d6; color:white; padding:25px; text-align:center; border-radius:8px 8px 0 0; }
+            .content { padding:25px; border:1px solid #e1e4e8; }
+            table { width:100%; border-collapse:collapse; margin:15px 0; }
+            th { background:#0366d6; color:white; padding:10px; text-align:left; }
+            .note { background:#fff3cd; border-left:4px solid #f59e0b; padding:15px; margin:15px 0; }
           </style></head>
           <body>
             <div class="header">
@@ -894,7 +908,7 @@ jobs:
               <p>Dear Approvers,</p>
               <p>The following iFlow(s) passed CPILint and Postman tests. Approval is required before merge into <strong>${DEVELOP_BRANCH}</strong> and QA deployment. Click the link to review and approve.</p>
               <table>
-                <thead><tr><th>iFlow</th><th>Version</th><th>PR</th><th>Action</th></tr></thead>
+                <thead><tr><th>iFlow</th><th>Version</th><th>Action</th></tr></thead>
                 <tbody>${ROWS}</tbody>
               </table>
               <div class="note"><strong>Process:</strong> Once the required approvals are given on the PR, it auto-merges to ${DEVELOP_BRANCH} and QA deployment begins.</div>
@@ -916,6 +930,4 @@ jobs:
           subject: ${{ steps.email.outputs.subject }}
           html_body: file://approval-email.html
           from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
-          to: ${{ vars.EMAIL_APPROVERS_LIST }}
-
- 
+          to: ${{ secrets.EMAIL_APPROVERS_LIST }}
