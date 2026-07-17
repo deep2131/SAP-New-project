@@ -930,4 +930,4 @@ jobs:
           subject: ${{ steps.email.outputs.subject }}
           html_body: file://approval-email.html
           from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
-          to: ${{ secrets.EMAIL_APPROVERS_LIST }}
+          to: ${{ vars.EMAIL_APPROVERS_LIST }}
