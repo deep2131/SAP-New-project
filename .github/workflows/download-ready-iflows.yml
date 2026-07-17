@@ -359,17 +359,24 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install CPILint
+      - name: Install CPILint (vendored)
         shell: bash
         run: |
           set -euo pipefail
           [ ! -f "$CPILINT_RULES" ] && { echo "::error::$CPILINT_RULES not found"; exit 1; }
-          CPILINT_URL="https://github.com/mwittrock/cpilint/releases/download/v${CPILINT_VERSION}/cpilint-${CPILINT_VERSION}.zip"
-          curl -sSL -o cpilint.zip "$CPILINT_URL"
-          unzip -q cpilint.zip -d cpilint-tool
+
+          VENDORED="tools/cpilint-${CPILINT_VERSION}.zip"
+          if [ ! -f "$VENDORED" ]; then
+            echo "::error title=CPILint missing::Vendored $VENDORED not found in repo."
+            echo "Add the CPILint zip to tools/ and commit it."
+            exit 1
+          fi
+
+          unzip -q "$VENDORED" -d cpilint-tool
           CPILINT_BIN=$(find cpilint-tool -name "cpilint" -type f | head -1)
           chmod +x "$CPILINT_BIN"
           echo "CPILINT_BIN=$CPILINT_BIN" >> "$GITHUB_ENV"
+          echo "Using vendored CPILint: $VENDORED"
 
       - name: Run CPILint on latest iFlows (partial success)
         env:
@@ -497,11 +504,14 @@ jobs:
           path: cpilint-artifacts
         continue-on-error: true
 
-      - name: Install Postman CLI
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Newman
         shell: bash
-        run: |
-          curl -o- "https://dl-cli.pstmn.io/install/linux64.sh" | sh
-          echo "Postman CLI: $(postman --version)"
+        run: npm install -g newman@6.2.1
 
       - name: Run Postman on CPILint-passers only (partial success)
         env:
@@ -567,7 +577,7 @@ jobs:
 
             FAILED_THIS=0
             set +e
-            postman collection run "$collection" --env-var "baseUrl=$CPI_DEV_ENDPOINT" --env-var "tokenUrl=$CPI_TOKEN_URL" --env-var "clientId=$CPI_CLIENT_ID" --env-var "clientSecret=$CPI_CLIENT_SECRET" > "postman-${SAFE_ID}.log" 2>&1
+            newman run "$collection" --env-var "baseUrl=$CPI_DEV_ENDPOINT" --env-var "tokenUrl=$CPI_TOKEN_URL" --env-var "clientId=$CPI_CLIENT_ID" --env-var "clientSecret=$CPI_CLIENT_SECRET" > "postman-${SAFE_ID}.log" 2>&1
             POSTMAN_EXIT=$?
             set -e
 
