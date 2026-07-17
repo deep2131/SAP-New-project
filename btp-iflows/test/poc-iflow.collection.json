@@ -1,32 +1,45 @@
 {
   "info": {
     "name": "poc-iflow - QA Test Suite",
-    "description": "POC test for poc-iflow. Owner: deepali. Package: DemoIntegrationPackage",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    {
-      "key": "baseUrl",
-      "value": "https://postman-echo.com",
-      "type": "string"
-    }
+    { "key": "baseUrl", "value": "" },
+    { "key": "tokenUrl", "value": "" },
+    { "key": "clientId", "value": "" },
+    { "key": "clientSecret", "value": "" },
+    { "key": "accessToken", "value": "" }
   ],
   "item": [
     {
-      "name": "TC01 - Happy Path: GET succeeds",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/get?iflow=poc-iflow",
-          "host": ["{{baseUrl}}"],
-          "path": ["get"],
-          "query": [
-            { "key": "iflow", "value": "poc-iflow" }
-          ]
-        }
-      },
+      "name": "TC01 - Call poc-iflow endpoint",
       "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "var tokenUrl = pm.variables.get('tokenUrl');",
+              "if (tokenUrl && tokenUrl.indexOf('/oauth/token') === -1) {",
+              "  tokenUrl = tokenUrl.replace(/\\/$/, '') + '/oauth/token';",
+              "}",
+              "pm.sendRequest({",
+              "  url: tokenUrl,",
+              "  method: 'POST',",
+              "  header: { 'Content-Type': 'application/x-www-form-urlencoded' },",
+              "  body: { mode: 'urlencoded', urlencoded: [",
+              "    { key: 'grant_type', value: 'client_credentials' },",
+              "    { key: 'client_id', value: pm.variables.get('clientId') },",
+              "    { key: 'client_secret', value: pm.variables.get('clientSecret') }",
+              "  ]}",
+              "}, function (err, res) {",
+              "  if (!err && res.code === 200) {",
+              "    pm.variables.set('accessToken', res.json().access_token);",
+              "  }",
+              "});"
+            ]
+          }
+        },
         {
           "listen": "test",
           "script": {
@@ -35,55 +48,32 @@
               "pm.test('Status code is 200', function () {",
               "    pm.response.to.have.status(200);",
               "});",
-              "",
-              "pm.test('Response time under 5s', function () {",
-              "    pm.expect(pm.response.responseTime).to.be.below(5000);",
-              "});",
-              "",
-              "pm.test('Echo returns query param', function () {",
-              "    var json = pm.response.json();",
-              "    pm.expect(json.args.iflow).to.eql('poc-iflow');",
+              "pm.test('Response time under 10s', function () {",
+              "    pm.expect(pm.response.responseTime).to.be.below(10000);",
               "});"
             ]
           }
         }
-      ]
-    },
-    {
-      "name": "TC02 - POST with payload",
+      ],
       "request": {
         "method": "POST",
         "header": [
           { "key": "Content-Type", "value": "application/json" }
         ],
+        "auth": {
+          "type": "bearer",
+          "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+        },
         "url": {
-          "raw": "{{baseUrl}}/post",
+          "raw": "{{baseUrl}}/http/poc-iflow",
           "host": ["{{baseUrl}}"],
-          "path": ["post"]
+          "path": ["http", "poc-iflow"]
         },
         "body": {
           "mode": "raw",
-          "raw": "{\"orderId\": \"TEST-001\", \"amount\": 100}"
+          "raw": "{\"test\": \"data\"}"
         }
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('Status code is 200', function () {",
-              "    pm.response.to.have.status(200);",
-              "});",
-              "",
-              "pm.test('Payload echoed correctly', function () {",
-              "    var json = pm.response.json();",
-              "    pm.expect(json.data.orderId).to.eql('TEST-001');",
-              "});"
-            ]
-          }
-        }
-      ]
+      }
     }
   ]
 }
