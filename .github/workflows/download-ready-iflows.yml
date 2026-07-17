@@ -461,14 +461,17 @@ jobs:
             passed-list.txt
           if-no-files-found: ignore
 
-  # ═══════════════════════════════════════════════════════════════
-  # JOB 3: Postman — tests ONLY iFlows that passed CPILint (handoff)
+ # ═══════════════════════════════════════════════════════════════
+  # JOB 3: Postman — tests ONLY CPILint-passers; outputs has_passers
   # ═══════════════════════════════════════════════════════════════
   run-postman:
     name: Postman collection tests
     needs: [download-ready-iflows, run-cpilint]
     if: needs.download-ready-iflows.outputs.skip_download != 'true'
     runs-on: ubuntu-latest
+
+    outputs:
+      has_passers: ${{ steps.run.outputs.has_passers }}
 
     steps:
       - name: Checkout target branch
@@ -498,6 +501,7 @@ jobs:
           echo "Postman CLI: $(postman --version)"
 
       - name: Run Postman on CPILint-passers only (partial success)
+        id: run
         env:
           CPI_DEV_ENDPOINT: ${{ secrets.CPI_DEV_ENDPOINT }}
           CPI_TOKEN_URL: ${{ secrets.CPI_RUNTIME_TOKEN_URL }}
@@ -515,16 +519,18 @@ jobs:
           : > failure-details.txt
           : > passed-list.txt
 
-          # ═══ Read the iFlows that are NEW and PASSED CPILint ═══
+          # ── Read iFlows that are NEW and PASSED CPILint (handoff) ──
           CPILINT_PASSED="cpilint-artifacts/passed-list.txt"
           if [ ! -f "$CPILINT_PASSED" ]; then
             echo "No CPILint passed-list found - nothing to Postman-test."
+            echo "has_passers=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          NEW_IDS=$(cut -d'|' -f1 "$CPILINT_PASSED" | grep -v '^$' | sort -u)
+          NEW_IDS=$(cut -d'|' -f1 "$CPILINT_PASSED" | grep -v '^$' | sort -u || true)
           if [ -z "$NEW_IDS" ]; then
             echo "No iFlows passed CPILint - nothing to Postman-test."
+            echo "has_passers=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -538,7 +544,6 @@ jobs:
             IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
             collection="$COLLECTIONS_DIR/${IFLOW_ID}.collection.json"
 
-            # Safety: must still exist
             [ ! -d "$IFLOW_DIR" ] && { echo "SKIP $IFLOW_ID (folder gone)"; continue; }
 
             VERSION=$(ls -1 "$IFLOW_DIR" 2>/dev/null | head -1)
@@ -584,8 +589,6 @@ jobs:
               fi
             fi
           done <<< "$NEW_IDS"
-
-          echo "════════════════════════════════════════"
           echo "Postman — Passed: $TOTAL_PASSED | Failed: $TOTAL_FAILED"
 
           if [ -n "$REMOVED" ]; then
@@ -598,7 +601,13 @@ jobs:
             fi
           fi
 
-          # ALWAYS exit 0 - passers continue to auto-PR
+          # ── Output has_passers so auto-PR job runs ONLY if something passed ──
+          if [ -s passed-list.txt ]; then
+            echo "has_passers=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_passers=false" >> "$GITHUB_OUTPUT"
+          fi
+
           echo "Postman gate complete (partial success allowed)"
           exit 0
 
@@ -725,7 +734,7 @@ jobs:
   auto-pr-develop:
     name: Auto-PR to develop
     needs: [run-cpilint, run-postman]
-    if: needs.run-cpilint.result == 'success' && needs.run-postman.result == 'success'
+    if: needs.run-postman.outputs.has_passers == 'true'
     runs-on: ubuntu-latest
     environment: dev
 
