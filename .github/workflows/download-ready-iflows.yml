@@ -810,7 +810,7 @@ jobs:
             # ── Isolate each iFlow's git work in a subshell ──
             # A failure here logs a warning and continues to the next iFlow.
             if (
-              set -e
+              set -ex
 
               # Clean, deterministic starting point each iteration
               git fetch origin "$DEVELOP_BRANCH"
