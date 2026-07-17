@@ -8,11 +8,12 @@
     { "key": "tokenUrl", "value": "" },
     { "key": "clientId", "value": "" },
     { "key": "clientSecret", "value": "" },
-    { "key": "accessToken", "value": "" }
+    { "key": "accessToken", "value": "" },
+    { "key": "csrfToken", "value": "" }
   ],
   "item": [
     {
-      "name": "TC01 - Call poc-iflow endpoint",
+      "name": "TC01 - POST to poc-iflow",
       "event": [
         {
           "listen": "prerequest",
@@ -34,7 +35,20 @@
               "  ]}",
               "}, function (err, res) {",
               "  if (!err && res.code === 200) {",
-              "    pm.variables.set('accessToken', res.json().access_token);",
+              "    var token = res.json().access_token;",
+              "    pm.variables.set('accessToken', token);",
+              "    pm.sendRequest({",
+              "      url: pm.variables.get('baseUrl') + '/http/poc-iflow',",
+              "      method: 'GET',",
+              "      header: { 'Authorization': 'Bearer ' + token, 'x-csrf-token': 'fetch' }",
+              "    }, function (e, r) {",
+              "      if (!e) {",
+              "        var c = r.headers.get('x-csrf-token');",
+              "        if (c) { pm.variables.set('csrfToken', c); }",
+              "      }",
+              "    });",
+              "  } else {",
+              "    console.log('Token failed:', err || res.code);",
               "  }",
               "});"
             ]
@@ -58,12 +72,10 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" }
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+          { "key": "x-csrf-token", "value": "{{csrfToken}}" }
         ],
-        "auth": {
-          "type": "bearer",
-          "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
-        },
         "url": {
           "raw": "{{baseUrl}}/http/poc-iflow",
           "host": ["{{baseUrl}}"],
