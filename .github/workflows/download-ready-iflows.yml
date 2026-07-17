@@ -766,17 +766,26 @@ jobs:
           DOWNLOAD_DIR="${DOWNLOAD_DIR:-btp-iflows}"
 
           PASSED_FILE="postman-artifacts/passed-list.txt"
-          if [ ! -f "$PASSED_FILE" ]; then
-            echo "No Postman passed-list - no PRs."
+
+          # ── Clear message + controlled fail if NOTHING passed ──
+          if [ ! -f "$PASSED_FILE" ] || [ ! -s "$PASSED_FILE" ]; then
+            echo "════════════════════════════════════════"
+            echo "::error title=No iFlows passed::All iFlows failed the quality gates."
+            echo "No iFlows passed CPILint + Postman — nothing to create a PR for."
+            echo "Failed iFlows were removed. Fix the issues (see the emailed report),"
+            echo "save a new version in SAP CPI, and re-run the pipeline."
+            echo "════════════════════════════════════════"
             echo "prs_created=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            exit 1                      # ← intentional fail with clear message
           fi
 
-          PASSED_IDS=$(cut -d'|' -f1 "$PASSED_FILE" | grep -v '^$' | sort -u)
+          # Safe extraction (|| true prevents grep-empty from killing under pipefail)
+          PASSED_IDS=$(cut -d'|' -f1 "$PASSED_FILE" | grep -v '^$' | sort -u || true)
+
           if [ -z "$PASSED_IDS" ]; then
-            echo "No fully-passed iFlows - no PRs."
+            echo "::error title=No iFlows passed::All iFlows failed - no PR created."
             echo "prs_created=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            exit 1
           fi
 
           echo "Fully-passed iFlows eligible for PR:"
