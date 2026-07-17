@@ -766,63 +766,47 @@ jobs:
           DOWNLOAD_DIR="${DOWNLOAD_DIR:-btp-iflows}"
 
           PASSED_FILE="postman-artifacts/passed-list.txt"
-
           if [ ! -f "$PASSED_FILE" ] || [ ! -s "$PASSED_FILE" ]; then
             echo "::error title=No iFlows passed::All iFlows failed the quality gates."
-            echo "No iFlows passed CPILint + Postman - nothing to create a PR for."
             echo "prs_created=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
-          PASSED_IDS=$(cut -d'|' -f1 "$PASSED_FILE" | grep -v '^$' | sort -u || true)
-          [ -z "$PASSED_IDS" ] && { echo "::error::No passers"; echo "prs_created=false" >> "$GITHUB_OUTPUT"; exit 1; }
-
-          echo "Fully-passed iFlows eligible for PR:"
-          echo "$PASSED_IDS"
+          # ── Capture id|version pairs NOW (passed-list already has them) ──
+          # Format of passed-list.txt: IFLOW_ID|VERSION|Postman
+          # So we read version directly from the file — NO disk lookup needed!
+          cp "$PASSED_FILE" pr-work.txt
+          echo "Passed iFlows:"
+          cut -d'|' -f1 pr-work.txt
 
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           : > pr-summary.txt
 
-          # Snapshot open PR head branches once (for dedup)
           OPEN_HEADS=$(gh pr list --base "$DEVELOP_BRANCH" --state open --json headRefName --jq '.[].headRefName' 2>/dev/null || true)
-
-          # Make sure develop ref is available locally
-          git fetch origin "$DEVELOP_BRANCH" 2>/dev/null || true
 
           CREATED=0
 
-          while IFS= read -r IFLOW_ID; do
+          # Read id + version straight from passed-list (no ls, no disk dependency)
+          while IFS='|' read -r IFLOW_ID VERSION GATE; do
             [ -z "$IFLOW_ID" ] && continue
             SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
+            [ -z "$VERSION" ] && VERSION="unknown"
 
             echo "════════════════════════════════════════"
-            echo "Processing PR for iFlow: $IFLOW_ID"
+            echo "Processing PR for iFlow: $IFLOW_ID (v$VERSION)"
 
-            # ── Dedup: skip if an open PR branch already exists for this iFlow ──
+            # Dedup: skip if an open PR branch already exists for this iFlow
             if echo "$OPEN_HEADS" | grep -q "^qa-deploy/${SAFE_ID}-"; then
               echo "SKIP: open PR branch already exists for '$IFLOW_ID'"
               continue
             fi
 
-            VERSION=$(ls -1 "$DOWNLOAD_DIR/$SAFE_ID" 2>/dev/null | head -1)
-            [ -z "$VERSION" ] && VERSION="unknown"
-
-            # ── Isolate each iFlow's git work in a subshell ──
-            # A failure here logs a warning and continues to the next iFlow.
             if (
-              set -ex
-
-              # Clean, deterministic starting point each iteration
+              set -e
               git fetch origin "$DEVELOP_BRANCH"
-
               TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
               TRIGGER_BRANCH="qa-deploy/${SAFE_ID}-${TIMESTAMP}"
-
-              # Create a fresh empty branch straight from origin/develop
-              # -B resets if the name exists; source is origin/develop so no
-              # leftover state from the previous iteration matters.
               git checkout -B "$TRIGGER_BRANCH" "origin/$DEVELOP_BRANCH"
-
               git commit --allow-empty -m "QA Deploy Trigger: $IFLOW_ID (gates passed, source: $TARGET_BRANCH)"
               git push origin "$TRIGGER_BRANCH"
 
@@ -851,18 +835,15 @@ jobs:
                 && echo "Auto-merge enabled for #$PR_NUMBER" \
                 || echo "::warning::Could not enable auto-merge for #$PR_NUMBER"
 
-              # Record for the approval email (id|version|prnum|prurl)
               echo "${IFLOW_ID}|${VERSION}|${PR_NUMBER}|${PR_DIRECT_URL}" >> pr-summary.txt
             ); then
               CREATED=$((CREATED + 1))
               echo "Done: $IFLOW_ID"
             else
-              echo "::warning title=PR creation failed::Could not create PR for '$IFLOW_ID' - continuing with the rest."
-              # Return to a safe branch so the next iteration starts clean
-              git checkout "origin/$TARGET_BRANCH" 2>/dev/null || git checkout "$TARGET_BRANCH" 2>/dev/null || true
+              echo "::warning::Could not create PR for '$IFLOW_ID' - continuing."
             fi
 
-          done <<< "$PASSED_IDS"
+          done < pr-work.txt
 
           echo "════════════════════════════════════════"
           echo "PRs created this run: $CREATED"
