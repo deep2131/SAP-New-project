@@ -628,7 +628,7 @@ jobs:
   # ═══════════════════════════════════════════════════════════════
   # JOB 4: Send Report — SMTP-FREE (issue + @mentions -> notifications@github.com)
   # Fix: gh issue create uses --repo (no checkout / git context needed)
-  # Recipients: GitHub usernames in repo variable "distribution_list"
+  # Recipients: GitHub usernames in repo variable "DISTRIBUTION_LIST"
   # ═══════════════════════════════════════════════════════════════
   send-report:
     name: Send quality gate report
@@ -723,12 +723,12 @@ jobs:
 
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          # distribution_list (usernames) -> @mentions
-          RAW="${{ vars.distribution_list }}"
+          # DISTRIBUTION_LIST (usernames) -> @mentions
+          RAW="${{ vars.DISTRIBUTION_LIST }}"
           if [ -n "$RAW" ]; then
             MENTIONS=$(echo "$RAW" | sed 's/[[:space:]]//g; s/,/ @/g; s/^/@/')
           else
-            MENTIONS="(no recipients in distribution_list variable)"
+            MENTIONS="(no recipients in DISTRIBUTION_LIST variable)"
           fi
 
           # Assemble markdown body
@@ -924,8 +924,8 @@ jobs:
             fi
           }
 
-          # distribution_list (usernames) -> @mentions
-          RAW="${{ vars.distribution_list }}"
+          # DISTRIBUTION_LIST (usernames) -> @mentions
+          RAW="${{ vars.DISTRIBUTION_LIST }}"
           if [ -n "$RAW" ]; then
             MENTIONS=$(echo "$RAW" | sed 's/[[:space:]]//g; s/,/ @/g; s/^/@/')
           else
