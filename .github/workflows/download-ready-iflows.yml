@@ -625,8 +625,8 @@ jobs:
             failure-details.txt
             passed-list.txt
           if-no-files-found: ignore
-     # ═══════════════════════════════════════════════════════════════
-  # JOB 4: Send Report — per-gate status + honest overall banner
+  # ═══════════════════════════════════════════════════════════════
+  # JOB 4: Send Report — per-gate status + CPILint issue reasons
   # ═══════════════════════════════════════════════════════════════
   send-report:
     name: Send quality gate report
@@ -675,9 +675,9 @@ jobs:
           CPILINT_FAILED=0
           PASSED_ROWS=""
           FAILED_ROWS=""
+          CPILINT_ISSUE_ROWS=""
 
           # ── PASSED section: iFlows that passed POSTMAN (the gate) ──
-          # Show Postman + CPILint status separately; count CPILint failures.
           if [ -f "postman-artifacts/passed-list.txt" ]; then
             while IFS='|' read -r id version gate; do
               [ -z "$id" ] && continue
@@ -695,6 +695,17 @@ jobs:
             done < "postman-artifacts/passed-list.txt"
           fi
 
+          # ── CPILint Issues: reasons for Postman-passers that failed CPILint ──
+          if [ -f "cpilint-artifacts/failure-details.txt" ]; then
+            while IFS='|' read -r id version gate reason fix; do
+              [ -z "$id" ] && continue
+              # Only for iFlows that ALSO passed Postman (survived to PR)
+              if grep -q "^${id}|" postman-artifacts/passed-list.txt 2>/dev/null; then
+                CPILINT_ISSUE_ROWS="${CPILINT_ISSUE_ROWS}<tr><td>${id}</td><td>${version}</td><td style='font-family:monospace;font-size:0.85em;'>${reason}</td><td style='color:#0366d6;'>${fix}</td></tr>"
+              fi
+            done < "cpilint-artifacts/failure-details.txt"
+          fi
+
           # ── FAILED section: Postman/Coverage failures (the blockers, removed) ──
           if [ -f "postman-artifacts/failure-details.txt" ]; then
             while IFS='|' read -r id version gate reason fix; do
@@ -704,7 +715,7 @@ jobs:
             done < "postman-artifacts/failure-details.txt"
           fi
 
-          # ── Overall banner: factors in BOTH Postman failures AND CPILint failures ──
+          # ── Overall banner: factors BOTH Postman failures AND CPILint failures ──
           if [ "$FAILED_COUNT" -eq 0 ] && [ "$CPILINT_FAILED" -eq 0 ] && [ "$PASSED_COUNT" -gt 0 ]; then
             OVERALL="ALL PASSED"; COLOR="#107c10"; PREFIX="[PASSED]"
           elif [ "$PASSED_COUNT" -eq 0 ] && [ "$FAILED_COUNT" -gt 0 ]; then
@@ -712,7 +723,6 @@ jobs:
           elif [ "$PASSED_COUNT" -eq 0 ] && [ "$FAILED_COUNT" -eq 0 ]; then
             OVERALL="NO iFLOWS"; COLOR="#6a737d"; PREFIX="[INFO]"
           else
-            # Some Postman failures OR some CPILint failures -> review needed
             OVERALL="PARTIAL - REVIEW NEEDED"; COLOR="#f59e0b"; PREFIX="[PARTIAL]"
           fi
 
@@ -723,15 +733,14 @@ jobs:
             PASSED_SECTION="<h3 style='color:#107c10;'>Passed iFlows (proceeding to PR)</h3><table><thead><tr><th>iFlow</th><th>Version</th><th>Postman</th><th>CPILint</th></tr></thead><tbody>${PASSED_ROWS}</tbody></table>"
           fi
 
+          CPILINT_ISSUE_SECTION=""
+          if [ -n "$CPILINT_ISSUE_ROWS" ]; then
+            CPILINT_ISSUE_SECTION="<h3 style='color:#f59e0b;'>CPILint Issues (deployment proceeded - please review)</h3><table><thead><tr><th>iFlow</th><th>Version</th><th>Why CPILint Failed</th><th>How to Fix</th></tr></thead><tbody>${CPILINT_ISSUE_ROWS}</tbody></table>"
+          fi
+
           FAILED_SECTION=""
           if [ -n "$FAILED_ROWS" ]; then
             FAILED_SECTION="<h3 style='color:#d13438;'>Failed iFlows (removed - fix and re-run)</h3><table><thead><tr><th>iFlow</th><th>Version</th><th>Gate</th><th>Why It Failed</th><th>How to Fix</th></tr></thead><tbody>${FAILED_ROWS}</tbody></table>"
-          fi
-
-          # CPILint note (only if some passers failed CPILint)
-          CPILINT_NOTE=""
-          if [ "$CPILINT_FAILED" -gt 0 ]; then
-            CPILINT_NOTE="<p style='background:#fff3cd;border-left:4px solid #f59e0b;padding:12px;'><strong>Note:</strong> ${CPILINT_FAILED} iFlow(s) passed Postman but failed CPILint. Deployment proceeds, but please review and fix the CPILint issues.</p>"
           fi
 
           # Full HTML report as the email BODY (no attachment)
@@ -751,8 +760,8 @@ jobs:
             <div class="content">
               <p><strong>Branch:</strong> ${TARGET_BRANCH} | <strong>Time:</strong> $(date -u +'%Y-%m-%d %H:%M UTC')</p>
               <div class="summary"><strong>Summary:</strong> ${PASSED_COUNT} passed Postman, ${FAILED_COUNT} failed | ${CPILINT_FAILED} passed Postman but failed CPILint</div>
-              ${CPILINT_NOTE}
               ${PASSED_SECTION}
+              ${CPILINT_ISSUE_SECTION}
               ${FAILED_SECTION}
               <p style='margin-top:20px;color:#6a737d;'>Passed iFlows proceed to auto-PR. Failed iFlows were removed - fix the issue, save a new version in SAP CPI, and re-run. Full logs in workflow artifacts.</p>
             </div>
@@ -938,15 +947,12 @@ jobs:
 
           ROWS=""
           COUNT=0
-          # pr-summary.txt: IFLOW_ID|VERSION|PR_NUMBER|PR_URL
           while IFS='|' read -r id version prnum prurl; do
             [ -z "$id" ] && continue
             COUNT=$((COUNT + 1))
 
-            # Postman = PASSED (only passers reach auto-PR)
             PM_CELL="<span style='color:#107c10;font-weight:bold;'>PASSED</span>"
 
-            # CPILint status (cross-referenced)
             CP=$(cpilint_status "$id")
             if [ "$CP" = "PASSED" ]; then
               CP_CELL="<span style='color:#107c10;font-weight:bold;'>PASSED</span>"
@@ -956,7 +962,8 @@ jobs:
               CP_CELL="<span style='color:#666;'>N/A</span>"
             fi
 
-            ROWS="${ROWS}<tr><td style='padding:10px;border:1px solid #ddd;'>${id}</td><td style='padding:10px;border:1px solid #ddd;'>${version}</td><td style='padding:10px;border:1px solid #ddd;'>${PM_CELL}</td><td style='padding:10px;border:1px solid #ddd;'>${CP_CELL}</td><td style='padding:10px;border:1px solid #ddd;'><a href=\"$"Review and Approve</a></td></tr>"
+            # Build the link SEPARATELY with single quotes (avoids the < redirect error)
+            LINK="<a href='${prurl}' style='color:#0366d6;font-weight:bold;text-decoration'padding:10px;border:1px solid #ddd;'>${id}</td><td style='padding:10px;border:1px solid #ddd;'>${version}</td><td style='padding:10px;border:1px solid #ddd;'>${PM_CELL}</td><td style='padding:10px;border:1px solid #ddd;'>${CP_CELL}</td><td style='padding:10px;border:1px solid #ddd;'>${LINK}</td></tr>"
           done < pr-summary.txt
 
           echo "subject=[Approval Needed] QA deployment - $(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
