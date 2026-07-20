@@ -907,7 +907,13 @@ jobs:
           else
             echo "prs_created=false" >> "$GITHUB_OUTPUT"
           fi
-
+      - name: Download CPILint artifacts (for status)
+        uses: actions/download-artifact@v4
+        with:
+          name: cpilint-reports
+          path: cpilint-artifacts
+        continue-on-error: true
+        
       - name: Prepare approval email
         if: steps.create_prs.outputs.prs_created == 'true'
         id: email
@@ -918,21 +924,47 @@ jobs:
           set -euo pipefail
           DEVELOP_BRANCH="${DEVELOP_BRANCH:-develop}"
 
+          # Helper: CPILint status for an iFlow
+          cpilint_status() {
+            local id="$1"
+            if grep -q "^${id}|" cpilint-artifacts/passed-list.txt 2>/dev/null; then
+              echo "PASSED"
+            elif grep -q "^${id}|" cpilint-artifacts/failure-details.txt 2>/dev/null; then
+              echo "FAILED"
+            else
+              echo "N/A"
+            fi
+          }
+
           ROWS=""
           COUNT=0
           # pr-summary.txt: IFLOW_ID|VERSION|PR_NUMBER|PR_URL
           while IFS='|' read -r id version prnum prurl; do
             [ -z "$id" ] && continue
             COUNT=$((COUNT + 1))
-            ROWS="${ROWS}<tr><td style='padding:10px;border:1px solid #ddd;'>${id}</td><td style='padding:10px;border:1px solid #ddd;'>${version}</td><td style='padding:10px;border:1px solid #ddd;'><a href=\"${prurl}\" style='color:#0366d6;font-weight:bold;text-decoration:none;'>Review and Approve</a></td></tr>"
+
+            # Postman = PASSED (only passers reach auto-PR)
+            PM_CELL="<span style='color:#107c10;font-weight:bold;'>PASSED</span>"
+
+            # CPILint status (cross-referenced)
+            CP=$(cpilint_status "$id")
+            if [ "$CP" = "PASSED" ]; then
+              CP_CELL="<span style='color:#107c10;font-weight:bold;'>PASSED</span>"
+            elif [ "$CP" = "FAILED" ]; then
+              CP_CELL="<span style='color:#f59e0b;font-weight:bold;'>FAILED</span>"
+            else
+              CP_CELL="<span style='color:#666;'>N/A</span>"
+            fi
+
+            ROWS="${ROWS}<tr><td style='padding:10px;border:1px solid #ddd;'>${id}</td><td style='padding:10px;border:1px solid #ddd;'>${version}</td><td style='padding:10px;border:1px solid #ddd;'>${PM_CELL}</td><td style='padding:10px;border:1px solid #ddd;'>${CP_CELL}</td><td style='padding:10px;border:1px solid #ddd;'><a href=\"$"Review and Approve</a></td></tr>"
           done < pr-summary.txt
 
-          echo "subject=[Approval Needed] ${COUNT} iFlow(s) ready for QA deployment" >> "$GITHUB_OUTPUT"
+          echo "subject=[Approval Needed] QA deployment - $(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
 
           cat > approval-email.html <<HTML_EOF
           <!DOCTYPE html>
           <html><head><style>
-            body { font-family: Arial, sans-serif; color:#24292e; max-width:800px; margin:0 auto; }
+            body { font-family: Arial, sans-serif; color:#24292e; max-width:850px; margin:0 auto; }
             .header { background:#0366d6; color:white; padding:25px; text-align:center; border-radius:8px 8px 0 0; }
             .content { padding:25px; border:1px solid #e1e4e8; }
             table { width:100%; border-collapse:collapse; margin:15px 0; }
@@ -942,22 +974,21 @@ jobs:
           <body>
             <div class="header">
               <h1>Approval Required: QA Deployment</h1>
-              <h2>${COUNT} iFlow(s) passed all quality gates</h2>
             </div>
             <div class="content">
               <p>Dear Approvers,</p>
-              <p>Approval is required before merge into <strong>${DEVELOP_BRANCH}</strong> and QA deployment. Click the link to review and approve.</p>
+              <p>Approval is required before merge into <strong>${DEVELOP_BRANCH}</strong> and QA deployment. Review the gate status below and click the link to approve.</p>
               <table>
-                <thead><tr><th>iFlow</th><th>Version</th><th>Action</th></tr></thead>
+                <thead><tr><th>iFlow</th><th>Version</th><th>Postman</th><th>CPILint</th><th>Action</th></tr></thead>
                 <tbody>${ROWS}</tbody>
               </table>
-              <div class="note"><strong>Process:</strong> Once the required approvals are given on the PR, it auto-merges to ${DEVELOP_BRANCH} and QA deployment begins.</div>
+              <div class="note"><strong>Process:</strong> Once the required approvals are given on the PR, merge to ${DEVELOP_BRANCH} to trigger QA deployment.</div>
               <p style="color:#6a737d;font-size:0.9em;">Automated notification from SAP CPI CI/CD pipeline.</p>
             </div>
           </body></html>
           HTML_EOF
 
-          echo "Email prepared for ${COUNT} PR(s)"
+          echo "Approval email prepared for ${COUNT} PR(s)"
 
       - name: Send approval email to approvers
         if: steps.create_prs.outputs.prs_created == 'true'
