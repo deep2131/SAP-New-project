@@ -937,7 +937,7 @@ jobs:
             [ -z "$id" ] && continue
             CP=$(cpilint_status "$id")
 
-            gh pr comment "$prnum" --repo "${{ github.repository }} --body "${MENTIONS}
+            gh pr comment "$prnum" --body "${MENTIONS}
 
           **Approval needed:** \`${id}\` (v${version}) passed the Postman quality gate.
 
