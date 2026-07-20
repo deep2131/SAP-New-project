@@ -625,8 +625,8 @@ jobs:
             failure-details.txt
             passed-list.txt
           if-no-files-found: ignore
-    # ═══════════════════════════════════════════════════════════════
-  # JOB 4: Send Report — per-gate status (Postman + CPILint), HTML in body
+     # ═══════════════════════════════════════════════════════════════
+  # JOB 4: Send Report — per-gate status + honest overall banner
   # ═══════════════════════════════════════════════════════════════
   send-report:
     name: Send quality gate report
@@ -672,11 +672,12 @@ jobs:
 
           PASSED_COUNT=0
           FAILED_COUNT=0
+          CPILINT_FAILED=0
           PASSED_ROWS=""
           FAILED_ROWS=""
 
           # ── PASSED section: iFlows that passed POSTMAN (the gate) ──
-          # Show Postman + CPILint status separately per iFlow.
+          # Show Postman + CPILint status separately; count CPILint failures.
           if [ -f "postman-artifacts/passed-list.txt" ]; then
             while IFS='|' read -r id version gate; do
               [ -z "$id" ] && continue
@@ -686,6 +687,7 @@ jobs:
                 CP_CELL="<span style='color:#107c10;font-weight:bold;'>PASSED</span>"
               elif [ "$CP" = "FAILED" ]; then
                 CP_CELL="<span style='color:#f59e0b;font-weight:bold;'>FAILED</span>"
+                CPILINT_FAILED=$((CPILINT_FAILED + 1))
               else
                 CP_CELL="<span style='color:#666;'>N/A</span>"
               fi
@@ -693,8 +695,7 @@ jobs:
             done < "postman-artifacts/passed-list.txt"
           fi
 
-          # ── FAILED section: iFlows that failed (Postman/Coverage) - the real blockers ──
-          # Only include Postman/Coverage failures here (these were removed).
+          # ── FAILED section: Postman/Coverage failures (the blockers, removed) ──
           if [ -f "postman-artifacts/failure-details.txt" ]; then
             while IFS='|' read -r id version gate reason fix; do
               [ -z "$id" ] && continue
@@ -703,15 +704,16 @@ jobs:
             done < "postman-artifacts/failure-details.txt"
           fi
 
-          # Overall banner (based on Postman = the gate)
-          if [ "$FAILED_COUNT" -eq 0 ] && [ "$PASSED_COUNT" -gt 0 ]; then
+          # ── Overall banner: factors in BOTH Postman failures AND CPILint failures ──
+          if [ "$FAILED_COUNT" -eq 0 ] && [ "$CPILINT_FAILED" -eq 0 ] && [ "$PASSED_COUNT" -gt 0 ]; then
             OVERALL="ALL PASSED"; COLOR="#107c10"; PREFIX="[PASSED]"
           elif [ "$PASSED_COUNT" -eq 0 ] && [ "$FAILED_COUNT" -gt 0 ]; then
             OVERALL="ALL FAILED"; COLOR="#d13438"; PREFIX="[FAILED]"
-          elif [ "$PASSED_COUNT" -gt 0 ] && [ "$FAILED_COUNT" -gt 0 ]; then
-            OVERALL="PARTIAL SUCCESS"; COLOR="#f59e0b"; PREFIX="[PARTIAL]"
-          else
+          elif [ "$PASSED_COUNT" -eq 0 ] && [ "$FAILED_COUNT" -eq 0 ]; then
             OVERALL="NO iFLOWS"; COLOR="#6a737d"; PREFIX="[INFO]"
+          else
+            # Some Postman failures OR some CPILint failures -> review needed
+            OVERALL="PARTIAL - REVIEW NEEDED"; COLOR="#f59e0b"; PREFIX="[PARTIAL]"
           fi
 
           echo "subject=$PREFIX Quality Gate Report - $(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
@@ -724,6 +726,12 @@ jobs:
           FAILED_SECTION=""
           if [ -n "$FAILED_ROWS" ]; then
             FAILED_SECTION="<h3 style='color:#d13438;'>Failed iFlows (removed - fix and re-run)</h3><table><thead><tr><th>iFlow</th><th>Version</th><th>Gate</th><th>Why It Failed</th><th>How to Fix</th></tr></thead><tbody>${FAILED_ROWS}</tbody></table>"
+          fi
+
+          # CPILint note (only if some passers failed CPILint)
+          CPILINT_NOTE=""
+          if [ "$CPILINT_FAILED" -gt 0 ]; then
+            CPILINT_NOTE="<p style='background:#fff3cd;border-left:4px solid #f59e0b;padding:12px;'><strong>Note:</strong> ${CPILINT_FAILED} iFlow(s) passed Postman but failed CPILint. Deployment proceeds, but please review and fix the CPILint issues.</p>"
           fi
 
           # Full HTML report as the email BODY (no attachment)
@@ -742,7 +750,8 @@ jobs:
             <div class="header"><h1>CI/CD Quality Gate Report</h1><h2>${OVERALL}</h2></div>
             <div class="content">
               <p><strong>Branch:</strong> ${TARGET_BRANCH} | <strong>Time:</strong> $(date -u +'%Y-%m-%d %H:%M UTC')</p>
-              <div class="summary"><strong>Summary:</strong> ${PASSED_COUNT} passed, ${FAILED_COUNT} failed</div>
+              <div class="summary"><strong>Summary:</strong> ${PASSED_COUNT} passed Postman, ${FAILED_COUNT} failed | ${CPILINT_FAILED} passed Postman but failed CPILint</div>
+              ${CPILINT_NOTE}
               ${PASSED_SECTION}
               ${FAILED_SECTION}
               <p style='margin-top:20px;color:#6a737d;'>Passed iFlows proceed to auto-PR. Failed iFlows were removed - fix the issue, save a new version in SAP CPI, and re-run. Full logs in workflow artifacts.</p>
@@ -750,7 +759,7 @@ jobs:
           </body></html>
           HTML_EOF
 
-          echo "Report prepared: $PASSED_COUNT passed, $FAILED_COUNT failed"
+          echo "Report prepared: $PASSED_COUNT passed, $FAILED_COUNT failed, $CPILINT_FAILED cpilint-failed"
 
       - name: Send email report
         uses: dawidd6/action-send-mail@v3
