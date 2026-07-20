@@ -625,8 +625,8 @@ jobs:
             failure-details.txt
             passed-list.txt
           if-no-files-found: ignore
-  # ═══════════════════════════════════════════════════════════════
-  # JOB 4: Send Report — shows BOTH passed and failed
+    # ═══════════════════════════════════════════════════════════════
+  # JOB 4: Send Report — per-gate status (Postman + CPILint), HTML in body
   # ═══════════════════════════════════════════════════════════════
   send-report:
     name: Send quality gate report
@@ -652,60 +652,91 @@ jobs:
 
       - name: Prepare report
         id: report
+        env:
+          TARGET_BRANCH: ${{ env.TARGET_BRANCH }}
         shell: bash
         run: |
           set -uo pipefail
 
-          # PASSED rows (only iFlows that passed BOTH gates = still exist)
-          # A passed iFlow appears in Postman's passed-list (final gate)
+          # Helper: CPILint status for a given iFlow id
+          cpilint_status() {
+            local id="$1"
+            if grep -q "^${id}|" cpilint-artifacts/passed-list.txt 2>/dev/null; then
+              echo "PASSED"
+            elif grep -q "^${id}|" cpilint-artifacts/failure-details.txt 2>/dev/null; then
+              echo "FAILED"
+            else
+              echo "N/A"
+            fi
+          }
+
+          PASSED_COUNT=0
+          FAILED_COUNT=0
           PASSED_ROWS=""
+          FAILED_ROWS=""
+
+          # ── PASSED section: iFlows that passed POSTMAN (the gate) ──
+          # Show Postman + CPILint status separately per iFlow.
           if [ -f "postman-artifacts/passed-list.txt" ]; then
             while IFS='|' read -r id version gate; do
               [ -z "$id" ] && continue
-              PASSED_ROWS="${PASSED_ROWS}<tr><td style='padding:8px;border:1px solid #ddd;'>${id}</td><td style='padding:8px;border:1px solid #ddd;'>${version}</td><td style='padding:8px;border:1px solid #ddd;color:#107c10;font-weight:bold;'>PASSED (both gates)</td></tr>"
+              PASSED_COUNT=$((PASSED_COUNT + 1))
+              CP=$(cpilint_status "$id")
+              if [ "$CP" = "PASSED" ]; then
+                CP_CELL="<span style='color:#107c10;font-weight:bold;'>PASSED</span>"
+              elif [ "$CP" = "FAILED" ]; then
+                CP_CELL="<span style='color:#f59e0b;font-weight:bold;'>FAILED</span>"
+              else
+                CP_CELL="<span style='color:#666;'>N/A</span>"
+              fi
+              PASSED_ROWS="${PASSED_ROWS}<tr><td>${id}</td><td>${version}</td><td><span style='color:#107c10;font-weight:bold;'>PASSED</span></td><td>${CP_CELL}</td></tr>"
             done < "postman-artifacts/passed-list.txt"
           fi
 
-          # FAILED rows (from both gates' failure-details)
-          FAILED_ROWS=""
-          for f in cpilint-artifacts/failure-details.txt postman-artifacts/failure-details.txt; do
-            [ -f "$f" ] || continue
+          # ── FAILED section: iFlows that failed (Postman/Coverage) - the real blockers ──
+          # Only include Postman/Coverage failures here (these were removed).
+          if [ -f "postman-artifacts/failure-details.txt" ]; then
             while IFS='|' read -r id version gate reason fix; do
               [ -z "$id" ] && continue
-              FAILED_ROWS="${FAILED_ROWS}<tr><td style='padding:8px;border:1px solid #ddd;'>${id}</td><td style='padding:8px;border:1px solid #ddd;'>${version}</td><td style='padding:8px;border:1px solid #ddd;color:#d13438;font-weight:bold;'>${gate}</td><td style='padding:8px;border:1px solid #ddd;font-family:monospace;font-size:0.85em;'>${reason}</td><td style='padding:8px;border:1px solid #ddd;color:#0366d6;'>${fix}</td></tr>"
-            done < "$f"
-          done
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+              FAILED_ROWS="${FAILED_ROWS}<tr><td>${id}</td><td>${version}</td><td style='color:#d13438;font-weight:bold;'>${gate}</td><td>${reason}</td><td style='color:#0366d6;'>${fix}</td></tr>"
+            done < "postman-artifacts/failure-details.txt"
+          fi
 
-          PASSED_COUNT=$(echo "$PASSED_ROWS" | grep -o "<tr>" | wc -l | tr -d ' ' || true)
-          FAILED_COUNT=$(echo "$FAILED_ROWS" | grep -o "<tr>" | wc -l | tr -d ' ' || true)
-
+          # Overall banner (based on Postman = the gate)
           if [ "$FAILED_COUNT" -eq 0 ] && [ "$PASSED_COUNT" -gt 0 ]; then
-            OVERALL="ALL PASSED"; HEADER_COLOR="#107c10"; PREFIX="[PASSED]"
+            OVERALL="ALL PASSED"; COLOR="#107c10"; PREFIX="[PASSED]"
           elif [ "$PASSED_COUNT" -eq 0 ] && [ "$FAILED_COUNT" -gt 0 ]; then
-            OVERALL="ALL FAILED"; HEADER_COLOR="#d13438"; PREFIX="[FAILED]"
+            OVERALL="ALL FAILED"; COLOR="#d13438"; PREFIX="[FAILED]"
           elif [ "$PASSED_COUNT" -gt 0 ] && [ "$FAILED_COUNT" -gt 0 ]; then
-            OVERALL="PARTIAL SUCCESS"; HEADER_COLOR="#f59e0b"; PREFIX="[PARTIAL]"
+            OVERALL="PARTIAL SUCCESS"; COLOR="#f59e0b"; PREFIX="[PARTIAL]"
           else
-            OVERALL="NO RESULTS"; HEADER_COLOR="#6a737d"; PREFIX="[INFO]"
+            OVERALL="NO iFLOWS"; COLOR="#6a737d"; PREFIX="[INFO]"
           fi
 
           echo "subject=$PREFIX Quality Gate Report - $(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
 
           PASSED_SECTION=""
-          [ -n "$PASSED_ROWS" ] && PASSED_SECTION="<h3 style='color:#107c10;'>Passed iFlows (proceeding to PR)</h3><table><thead><tr><th>iFlow</th><th>Version</th><th>Result</th></tr></thead><tbody>${PASSED_ROWS}</tbody></table>"
+          if [ -n "$PASSED_ROWS" ]; then
+            PASSED_SECTION="<h3 style='color:#107c10;'>Passed iFlows (proceeding to PR)</h3><table><thead><tr><th>iFlow</th><th>Version</th><th>Postman</th><th>CPILint</th></tr></thead><tbody>${PASSED_ROWS}</tbody></table>"
+          fi
 
           FAILED_SECTION=""
-          [ -n "$FAILED_ROWS" ] && FAILED_SECTION="<h3 style='color:#d13438;'>Failed iFlows (removed - fix and re-run)</h3><table><thead><tr><th>iFlow</th><th>Version</th><th>Gate</th><th>Why It Failed</th><th>How to Fix</th></tr></thead><tbody>${FAILED_ROWS}</tbody></table>"
+          if [ -n "$FAILED_ROWS" ]; then
+            FAILED_SECTION="<h3 style='color:#d13438;'>Failed iFlows (removed - fix and re-run)</h3><table><thead><tr><th>iFlow</th><th>Version</th><th>Gate</th><th>Why It Failed</th><th>How to Fix</th></tr></thead><tbody>${FAILED_ROWS}</tbody></table>"
+          fi
 
-          cat > report.html << HTML_EOF
+          # Full HTML report as the email BODY (no attachment)
+          cat > qa-email-body.html <<HTML_EOF
           <!DOCTYPE html>
           <html><head><style>
-            body { font-family: Arial, sans-serif; color: #24292e; max-width: 900px; margin: 0 auto; }
-            .header { background: ${HEADER_COLOR}; color: white; padding: 25px; text-align: center; }
-            .content { padding: 25px; border: 1px solid #e1e4e8; }
-            table { width: 100%; border-collapse: collapse; margin: 15px 0; }
-            th { background: #0366d6; color: white; padding: 10px; text-align: left; }
-            .summary { background: #f6f8fa; padding: 15px; border-radius: 6px; margin: 15px 0; }
+            body { font-family: Arial, sans-serif; color:#24292e; max-width:900px; margin:20px auto; }
+            .header { background:${COLOR}; color:white; padding:25px; text-align:center; }
+            .content { padding:25px; border:1px solid #e1e4e8; }
+            table { width:100%; border-collapse:collapse; margin:15px 0; }
+            th { background:#0366d6; color:white; padding:10px; text-align:left; }
+            td { padding:8px; border:1px solid #ddd; }
+            .summary { background:#f6f8fa; padding:15px; border-radius:6px; margin:15px 0; font-size:16px; }
           </style></head>
           <body>
             <div class="header"><h1>CI/CD Quality Gate Report</h1><h2>${OVERALL}</h2></div>
@@ -714,12 +745,12 @@ jobs:
               <div class="summary"><strong>Summary:</strong> ${PASSED_COUNT} passed, ${FAILED_COUNT} failed</div>
               ${PASSED_SECTION}
               ${FAILED_SECTION}
-              <p style='color:#6a737d;margin-top:20px;'>Passed iFlows proceed to auto-PR. Failed iFlows were removed - fix the issue, save a new version in SAP CPI, and re-run. Full logs in workflow artifacts.</p>
+              <p style='margin-top:20px;color:#6a737d;'>Passed iFlows proceed to auto-PR. Failed iFlows were removed - fix the issue, save a new version in SAP CPI, and re-run. Full logs in workflow artifacts.</p>
             </div>
           </body></html>
           HTML_EOF
 
-          echo "Report: $PASSED_COUNT passed, $FAILED_COUNT failed"
+          echo "Report prepared: $PASSED_COUNT passed, $FAILED_COUNT failed"
 
       - name: Send email report
         uses: dawidd6/action-send-mail@v3
@@ -729,9 +760,9 @@ jobs:
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
           subject: ${{ steps.report.outputs.subject }}
-          html_body: file://report.html
+          html_body: file://qa-email-body.html
           from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
-          to: ${{ vars.EMAIL_DISTRIBUTION_LIST }}
+          to: ${{ secrets.EMAIL_DISTRIBUTION_LIST }}
  # ═══════════════════════════════════════════════════════════════
   # JOB 5: Auto-PR to develop — trigger file + clickable email link
   # ═══════════════════════════════════════════════════════════════
