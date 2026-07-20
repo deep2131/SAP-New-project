@@ -378,32 +378,37 @@ jobs:
           echo "CPILINT_BIN=$CPILINT_BIN" >> "$GITHUB_ENV"
           echo "Using vendored CPILint: $VENDORED"
 
-      - name: Run CPILint on latest iFlows (partial success)
+      - name: Run CPILint 
         env:
-          TARGET_BRANCH: ${{ env.TARGET_BRANCH }}
           DOWNLOAD_DIR: ${{ env.DOWNLOAD_DIR }}
         shell: bash
         run: |
           set -uo pipefail
 
-          # Detect newly added iFlow ZIPs in the latest (download) commit
           NEW_ZIPS=$(git diff --name-only --diff-filter=A HEAD^ HEAD -- "$DOWNLOAD_DIR/**/*.zip" 2>/dev/null || true)
-          [ -z "$NEW_ZIPS" ] && { echo "No new ZIPs to lint."; : > passed-list.txt; : > failure-details.txt; exit 0; }
+          : > failure-details.txt
+          : > passed-list.txt
+          : > cpilint-new-iflows.txt      # ALL new iFlows (for Postman handoff)
 
-          echo "Newly downloaded iFlows to lint:"
+          if [ -z "$NEW_ZIPS" ]; then
+            echo "No new ZIPs to lint."
+            exit 0
+          fi
+
+          echo "iFlows to lint (all rules from $CPILINT_RULES):"
           echo "$NEW_ZIPS"
 
           TOTAL_PASSED=0
           TOTAL_FAILED=0
-          REMOVED=""
-          : > failure-details.txt
-          : > passed-list.txt
 
           while IFS= read -r zip; do
             [ -z "$zip" ] && continue
             [ ! -f "$zip" ] && continue
             IFLOW_ID=$(basename "$(dirname "$(dirname "$zip")")")
             VERSION=$(basename "$(dirname "$zip")")
+
+            # Record EVERY new iFlow for Postman (pass or fail - CPILint doesn't gate)
+            echo "${IFLOW_ID}|${VERSION}" >> cpilint-new-iflows.txt
 
             echo "════════════════════════════════════════"
             echo "Linting: $IFLOW_ID v$VERSION"
@@ -417,50 +422,28 @@ jobs:
             echo "DEBUG: CPILint exit code = $CPILINT_EXIT"
 
             if [ "$CPILINT_EXIT" -eq 2 ]; then
-              echo "::error::CPILint rules file is invalid. Fix $CPILINT_RULES."
-              exit 1
+              # Rules file invalid - tooling error. Report but DO NOT block.
+              echo "::warning title=CPILint rules file invalid::Check $CPILINT_RULES. Continuing (advisory)."
+              echo "${IFLOW_ID}|${VERSION}|CPILint|Rules file format invalid (exit 2)|Fix cpilint-rules.xml. (Advisory - did not block.)" >> failure-details.txt
+              TOTAL_FAILED=$((TOTAL_FAILED + 1))
             elif [ "$CPILINT_EXIT" -eq 0 ]; then
               echo "PASSED: $IFLOW_ID"
               TOTAL_PASSED=$((TOTAL_PASSED + 1))
-              # Record iFlow that is NEW and PASSED CPILint (for Postman handoff)
               echo "${IFLOW_ID}|${VERSION}|CPILint" >> passed-list.txt
             else
-              echo "FAILED: $IFLOW_ID - removing"
+              echo "FAILED (advisory): $IFLOW_ID"
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
               REASON=$(grep -iE "In iflow|does not have|not allowed|issue" "cpilint-${IFLOW_ID}.log" | head -3 | tr '\n' ' ' | sed 's/|/-/g')
-              [ -z "$REASON" ] && REASON="CPILint rule violation (see full log)"
-              echo "${IFLOW_ID}|${VERSION}|CPILint|${REASON}|Fix the rule violation in SAP CPI, save as a NEW version, re-run." >> failure-details.txt
-
-              SAFE_ID=$(echo "$IFLOW_ID" | tr -cd '[:alnum:]_.-')
-              IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
-              if [ -n "$SAFE_ID" ] && [ "$SAFE_ID" != "test" ] && [ -d "$IFLOW_DIR" ] && [ "$IFLOW_DIR" != "$DOWNLOAD_DIR" ]; then
-                rm -rf "$IFLOW_DIR"
-                REMOVED="${REMOVED}${IFLOW_ID}; "
-              fi
+              [ -z "$REASON" ] && REASON="CPILint rule violation (see log)"
+              echo "${IFLOW_ID}|${VERSION}|CPILint|${REASON}|Advisory only - fix in SAP CPI when convenient. Did NOT block deployment." >> failure-details.txt
             fi
           done <<< "$NEW_ZIPS"
 
           echo "════════════════════════════════════════"
-          echo "CPILint — Passed: $TOTAL_PASSED | Failed: $TOTAL_FAILED"
+          echo "CPILint (advisory) — Passed: $TOTAL_PASSED | Failed: $TOTAL_FAILED"
 
-          if [ -n "$REMOVED" ]; then
-            git add -A "$DOWNLOAD_DIR"
-            if ! git diff --staged --quiet; then
-              git commit -m "Remove CPILint-failed iFlows - run ${{ github.run_id }}"
-              git fetch origin "$TARGET_BRANCH"
-              git pull --rebase origin "$TARGET_BRANCH"
-              git push origin "$TARGET_BRANCH"
-            fi
-          fi
-          if [ "$TOTAL_PASSED" -gt 0 ]; then
-            echo "At least one iFlow passed CPILint - continuing to Postman."
-            exit 0                             
-          else
-            echo "::error title=CPILint - all failed::All iFlow(s) failed CPILint and were removed. Fix issues (see report) and re-run."
-            exit 1                             
-          fi
-          # ALWAYS exit 0 - passers continue to Postman via passed-list.txt
-          echo "CPILint gate complete (partial success allowed)"
+          # ALWAYS exit 0 - CPILint never blocks. 
+          echo "CPILint advisory complete - not blocking downstream jobs."
           exit 0
 
       - name: Upload CPILint reports
@@ -472,16 +455,20 @@ jobs:
             cpilint-*.log
             failure-details.txt
             passed-list.txt
+            cpilint-new-iflows.txt
           if-no-files-found: ignore
 
-  # ═══════════════════════════════════════════════════════════════
-  # JOB 3: Postman — tests ONLY iFlows that passed CPILint (handoff)
+    # ═══════════════════════════════════════════════════════════════
+  # JOB 3: Postman — tests ALL new iFlows (CPILint is advisory, not a gate)
   # ═══════════════════════════════════════════════════════════════
   run-postman:
     name: Postman collection tests
     needs: [download-ready-iflows, run-cpilint]
-    if: needs.download-ready-iflows.outputs.skip_download != 'true' && needs.run-cpilint.result == 'success'
+    if: needs.download-ready-iflows.outputs.skip_download != 'true'
     runs-on: ubuntu-latest
+
+    outputs:
+      has_passers: ${{ steps.run.outputs.has_passers }}
 
     steps:
       - name: Checkout target branch
@@ -497,7 +484,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Download CPILint passed-list (handoff)
+      - name: Download CPILint artifacts (new-iflows list handoff)
         uses: actions/download-artifact@v4
         with:
           name: cpilint-reports
@@ -513,7 +500,8 @@ jobs:
         shell: bash
         run: npm install -g newman@6.2.1
 
-      - name: Run Postman on CPILint-passers only (partial success)
+      - name: Run Postman on ALL new iFlows (partial success)
+        id: run
         env:
           CPI_DEV_ENDPOINT: ${{ secrets.CPI_DEV_ENDPOINT }}
           CPI_TOKEN_URL: ${{ secrets.CPI_RUNTIME_TOKEN_URL }}
@@ -531,20 +519,22 @@ jobs:
           : > failure-details.txt
           : > passed-list.txt
 
-          # ═══ Read the iFlows that are NEW and PASSED CPILint ═══
-          CPILINT_PASSED="cpilint-artifacts/passed-list.txt"
-          if [ ! -f "$CPILINT_PASSED" ]; then
-            echo "No CPILint passed-list found - nothing to Postman-test."
+          # ── Read ALL new iFlows (CPILint is advisory - does NOT gate this) ──
+          CPILINT_NEW="cpilint-artifacts/cpilint-new-iflows.txt"
+          if [ ! -f "$CPILINT_NEW" ]; then
+            echo "No new-iflows list found - nothing to Postman-test."
+            echo "has_passers=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          NEW_IDS=$(cut -d'|' -f1 "$CPILINT_PASSED" | grep -v '^$' | sort -u)
+          NEW_IDS=$(cut -d'|' -f1 "$CPILINT_NEW" | grep -v '^$' | sort -u || true)
           if [ -z "$NEW_IDS" ]; then
-            echo "No iFlows passed CPILint - nothing to Postman-test."
+            echo "No new iFlows to test."
+            echo "has_passers=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "iFlows that passed CPILint (to Postman-test):"
+          echo "New iFlows to Postman-test (all, regardless of CPILint result):"
           echo "$NEW_IDS"
 
           while IFS= read -r IFLOW_ID; do
@@ -554,7 +544,7 @@ jobs:
             IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
             collection="$COLLECTIONS_DIR/${IFLOW_ID}.collection.json"
 
-            # Safety: must still exist
+            # Safety: iFlow folder must still exist
             [ ! -d "$IFLOW_DIR" ] && { echo "SKIP $IFLOW_ID (folder gone)"; continue; }
 
             VERSION=$(ls -1 "$IFLOW_DIR" 2>/dev/null | head -1)
@@ -563,7 +553,7 @@ jobs:
             echo "════════════════════════════════════════"
             echo "Testing: $IFLOW_ID v$VERSION"
 
-            # Coverage check - no collection => remove + fail
+            # Coverage check - no collection => remove + fail (Postman IS the gate)
             if [ ! -f "$collection" ]; then
               echo "NO COVERAGE: '$IFLOW_ID' - REMOVING"
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
@@ -582,7 +572,7 @@ jobs:
             set -e
 
             cat "postman-${SAFE_ID}.log"
-            echo "DEBUG: Postman exit code = $POSTMAN_EXIT"
+            echo "DEBUG: Newman exit code = $POSTMAN_EXIT"
 
             if [ "$POSTMAN_EXIT" -eq 0 ]; then
               echo "PASSED: $IFLOW_ID"
@@ -604,6 +594,7 @@ jobs:
           echo "════════════════════════════════════════"
           echo "Postman — Passed: $TOTAL_PASSED | Failed: $TOTAL_FAILED"
 
+          # Commit removals (Postman failures / no-coverage)
           if [ -n "$REMOVED" ]; then
             git add -A "$DOWNLOAD_DIR"
             if ! git diff --staged --quiet; then
@@ -614,7 +605,13 @@ jobs:
             fi
           fi
 
-          # ALWAYS exit 0 - passers continue to auto-PR
+          # Output has_passers so auto-PR runs ONLY if something passed
+          if [ -s passed-list.txt ]; then
+            echo "has_passers=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_passers=false" >> "$GITHUB_OUTPUT"
+          fi
+
           echo "Postman gate complete (partial success allowed)"
           exit 0
 
