@@ -937,7 +937,7 @@ jobs:
             </div>
             <div class="content">
               <p>Dear Approvers,</p>
-              <p>The following iFlow(s) passed CPILint and Postman tests. Approval is required before merge into <strong>${DEVELOP_BRANCH}</strong> and QA deployment. Click the link to review and approve.</p>
+              <p>Approval is required before merge into <strong>${DEVELOP_BRANCH}</strong> and QA deployment. Click the link to review and approve.</p>
               <table>
                 <thead><tr><th>iFlow</th><th>Version</th><th>Action</th></tr></thead>
                 <tbody>${ROWS}</tbody>
