@@ -625,8 +625,9 @@ jobs:
             failure-details.txt
             passed-list.txt
           if-no-files-found: ignore
-   # ═══════════════════════════════════════════════════════════════
-  # JOB 4: Send Report — SMTP-FREE (GitHub issue + @mentions -> email)
+  # ═══════════════════════════════════════════════════════════════
+  # JOB 4: Send Report — SMTP-FREE (issue + @mentions -> notifications@github.com)
+  # Fix: gh issue create uses --repo (no checkout / git context needed)
   # Recipients: GitHub usernames in repo variable "distribution_list"
   # ═══════════════════════════════════════════════════════════════
   send-report:
@@ -771,13 +772,14 @@ jobs:
           echo "$BODY" >> "$GITHUB_STEP_SUMMARY"
 
           # 2) Create Issue with @mentions -> GitHub emails users from notifications@github.com
+          #    --repo avoids needing a checkout / local git context (fixes "not a git repository")
           gh issue create \
+            --repo "${{ github.repository }}" \
             --title "[Quality Gate] ${OVERALL} - $(date -u +'%Y-%m-%d %H:%M UTC')" \
             --body "$BODY" \
             || echo "::warning::Could not create notification issue"
 
           echo "Report notified (SMTP-free): $PASSED_COUNT passed, $FAILED_COUNT failed"
-
   # ═══════════════════════════════════════════════════════════════
   # JOB 5: Auto-PR to develop — SMTP-FREE approval (PR comment @mentions)
   # ═══════════════════════════════════════════════════════════════
@@ -935,7 +937,7 @@ jobs:
             [ -z "$id" ] && continue
             CP=$(cpilint_status "$id")
 
-            gh pr comment "$prnum" --body "${MENTIONS}
+            gh pr comment "$prnum" --repo "${{ github.repository }} --body "${MENTIONS}
 
           **Approval needed:** \`${id}\` (v${version}) passed the Postman quality gate.
 
