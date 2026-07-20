@@ -781,13 +781,13 @@ jobs:
           html_body: file://qa-email-body.html
           from: SAP CPI CI/CD <${{ secrets.EMAIL_FROM }}>
           to: ${{ vars.EMAIL_DISTRIBUTION_LIST }}
- # ═══════════════════════════════════════════════════════════════
-  # JOB 5: Auto-PR to develop — trigger file + clickable email link
+  # ═══════════════════════════════════════════════════════════════
+  # JOB 5: Auto-PR to develop — trigger file, manual merge, gate status email
   # ═══════════════════════════════════════════════════════════════
   auto-pr-develop:
     name: Auto-PR to develop
     needs: [run-cpilint, run-postman]
-    if: needs.run-cpilint.result == 'success' && needs.run-postman.result == 'success'
+    if: needs.run-postman.outputs.has_passers == 'true'
     runs-on: ubuntu-latest
     environment: dev
 
@@ -812,6 +812,13 @@ jobs:
           path: postman-artifacts
         continue-on-error: true
 
+      - name: Download CPILint artifacts (for status)
+        uses: actions/download-artifact@v4
+        with:
+          name: cpilint-reports
+          path: cpilint-artifacts
+        continue-on-error: true
+
       - name: Create per-iFlow PRs for full passers
         id: create_prs
         env:
@@ -829,20 +836,19 @@ jobs:
 
           PASSED_FILE="postman-artifacts/passed-list.txt"
           if [ ! -f "$PASSED_FILE" ] || [ ! -s "$PASSED_FILE" ]; then
-            echo "::error title=No iFlows passed::All iFlows failed the quality gates."
-            echo "No iFlows passed CPILint + Postman - nothing to create a PR for."
+            echo "::error title=No iFlows passed::Nothing to create a PR for."
             echo "prs_created=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
-          # passed-list.txt format: IFLOW_ID|VERSION|Postman  (version read from file, no disk lookup)
+          # passed-list.txt: IFLOW_ID|VERSION|Postman  (version read from file, no disk lookup)
           cp "$PASSED_FILE" pr-work.txt
           echo "Passed iFlows:"
           cut -d'|' -f1 pr-work.txt
 
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           : > pr-summary.txt
-      
+
           CREATED=0
 
           while IFS='|' read -r IFLOW_ID VERSION GATE; do
@@ -861,11 +867,11 @@ jobs:
               TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
               TRIGGER_BRANCH="qa-deploy/${SAFE_ID}-${TIMESTAMP}"
 
-              # Fresh empty branch from origin/develop
+              # Fresh branch straight from origin/develop
               git checkout -B "$TRIGGER_BRANCH" "origin/$DEVELOP_BRANCH"
 
-              # ── Trigger FILE (not empty commit): makes PR reviewable (Approve
-              #    button appears) AND triggers deploy-to-qa (path: .qa-triggers/**)
+              # Trigger FILE (not empty commit): makes PR reviewable (Approve button
+              # appears) AND triggers deploy-to-qa (path: .qa-triggers/**)
               mkdir -p .qa-triggers
               printf 'iFlow: %s\nVersion: %s\nSource: %s\nTriggered: %s\n' \
                 "$IFLOW_ID" "$VERSION" "$TARGET_BRANCH" "$(date -u +'%Y-%m-%d %H:%M UTC')" \
@@ -878,8 +884,7 @@ jobs:
               PR_BODY=$(printf '%s\n' \
                 "## QA Deployment Trigger for ${IFLOW_ID}" \
                 "" \
-                "Both quality gates passed (CPILint + Postman)." \
-                "Approval required before merge to ${DEVELOP_BRANCH}." \
+                "Passed the Postman quality gate. Approval required before merge to ${DEVELOP_BRANCH}." \
                 "" \
                 "- iFlow: ${IFLOW_ID}" \
                 "- Version: ${VERSION}" \
@@ -896,7 +901,9 @@ jobs:
               PR_DIRECT_URL="https://github.com/${{ github.repository }}/pull/${PR_NUMBER}"
               echo "PR #$PR_NUMBER created: $PR_DIRECT_URL"
 
-              # Record for email (id|version|prnum|prurl)
+              # NOTE: no auto-merge - approver merges MANUALLY after review
+              # (manual merge also triggers the repo's auto-delete of the branch)
+
               echo "${IFLOW_ID}|${VERSION}|${PR_NUMBER}|${PR_DIRECT_URL}" >> pr-summary.txt
             ); then
               CREATED=$((CREATED + 1))
@@ -916,13 +923,7 @@ jobs:
           else
             echo "prs_created=false" >> "$GITHUB_OUTPUT"
           fi
-      - name: Download CPILint artifacts (for status)
-        uses: actions/download-artifact@v4
-        with:
-          name: cpilint-reports
-          path: cpilint-artifacts
-        continue-on-error: true
-        
+
       - name: Prepare approval email
         if: steps.create_prs.outputs.prs_created == 'true'
         id: email
@@ -947,6 +948,7 @@ jobs:
 
           ROWS=""
           COUNT=0
+          # pr-summary.txt: IFLOW_ID|VERSION|PR_NUMBER|PR_URL
           while IFS='|' read -r id version prnum prurl; do
             [ -z "$id" ] && continue
             COUNT=$((COUNT + 1))
@@ -962,8 +964,10 @@ jobs:
               CP_CELL="<span style='color:#666;'>N/A</span>"
             fi
 
-            # Build the link SEPARATELY with single quotes (avoids the < redirect error)
-            LINK="<a href='${prurl}' style='color:#0366d6;font-weight:bold;text-decoration'padding:10px;border:1px solid #ddd;'>${id}</td><td style='padding:10px;border:1px solid #ddd;'>${version}</td><td style='padding:10px;border:1px solid #ddd;'>${PM_CELL}</td><td style='padding:10px;border:1px solid #ddd;'>${CP_CELL}</td><td style='padding:10px;border:1px solid #ddd;'>${LINK}</td></tr>"
+            # Build link as a SEPARATE variable with SINGLE quotes (fixes '<' syntax error)
+            LINK="<a href='${prurl}' style='color:#0366d6;font-weight:bold;text-decoration:none;'>Review and Approve</a>"
+
+            ROWS="${ROWS}<tr><td style='padding:10px;border:1px solid #ddd;'>${id}</td><td style='padding:10px;border:1px solid #ddd;'>${version}</td><td style='padding:10px;border:1px solid #ddd;'>${PM_CELL}</td><td style='padding:10px;border:1px solid #ddd;'>${CP_CELL}</td><td style='padding:10px;border:1px solid #ddd;'>${LINK}</td></tr>"
           done < pr-summary.txt
 
           echo "subject=[Approval Needed] QA deployment - $(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
