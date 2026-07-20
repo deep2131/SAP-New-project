@@ -625,8 +625,8 @@ jobs:
             failure-details.txt
             passed-list.txt
           if-no-files-found: ignore
-   # ═══════════════════════════════════════════════════════════════
-  # JOB 4: Send Report — SMTP-free; FAILS (red) if notification not sent
+  # ═══════════════════════════════════════════════════════════════
+  # JOB 4: Send Report — SMTP-free, clean markdown, fails if not sent
   # ═══════════════════════════════════════════════════════════════
   send-report:
     name: Send quality gate report
@@ -652,7 +652,7 @@ jobs:
           path: postman-artifacts
         continue-on-error: true
 
-      - name: Build + notify report (fails if not sent)
+      - name: Build + notify report
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_BRANCH: ${{ env.TARGET_BRANCH }}
@@ -672,7 +672,9 @@ jobs:
           }
 
           PASSED_COUNT=0; FAILED_COUNT=0; CPILINT_FAILED=0
-          PASSED_ROWS=""; CPILINT_ISSUE_ROWS=""; FAILED_ROWS=""
+          : > passed_rows.md
+          : > cpilint_rows.md
+          : > failed_rows.md
 
           if [ -f "postman-artifacts/passed-list.txt" ]; then
             while IFS='|' read -r id version gate; do
@@ -680,7 +682,7 @@ jobs:
               PASSED_COUNT=$((PASSED_COUNT + 1))
               CP=$(cpilint_status "$id")
               [ "$CP" = "FAILED" ] && CPILINT_FAILED=$((CPILINT_FAILED + 1))
-              PASSED_ROWS="${PASSED_ROWS}| ${id} | ${version} | PASSED | ${CP} |"$'\n'
+              echo "| ${id} | ${version} | PASSED | ${CP} |" >> passed_rows.md
             done < "postman-artifacts/passed-list.txt"
           fi
 
@@ -688,7 +690,7 @@ jobs:
             while IFS='|' read -r id version gate reason fix; do
               [ -z "$id" ] && continue
               if grep -q "^${id}|" postman-artifacts/passed-list.txt 2>/dev/null; then
-                CPILINT_ISSUE_ROWS="${CPILINT_ISSUE_ROWS}| ${id} | ${version} | ${reason} |"$'\n'
+                echo "| ${id} | ${version} | ${reason} |" >> cpilint_rows.md
               fi
             done < "cpilint-artifacts/failure-details.txt"
           fi
@@ -697,7 +699,7 @@ jobs:
             while IFS='|' read -r id version gate reason fix; do
               [ -z "$id" ] && continue
               FAILED_COUNT=$((FAILED_COUNT + 1))
-              FAILED_ROWS="${FAILED_ROWS}| ${id} | ${version} | ${gate} | ${reason} | ${fix} |"$'\n'
+              echo "| ${id} | ${version} | ${gate} | ${reason} | ${fix} |" >> failed_rows.md
             done < "postman-artifacts/failure-details.txt"
           fi
 
@@ -713,7 +715,7 @@ jobs:
 
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          # ── Robust @mention build (comma-separated, trim spaces, skip empties) ──
+          # ── Robust @mention build ──
           RAW="${{ vars.DISTRIBUTION_LIST}}"
           MENTIONS=""
           if [ -n "$RAW" ]; then
@@ -726,60 +728,68 @@ jobs:
             MENTIONS=$(echo "$MENTIONS" | xargs)
           fi
 
-          # FAIL if no valid recipients configured
           if [ -z "$MENTIONS" ]; then
-            echo "::error title=No recipients::DISTRIBUTION_LISTvariable is empty or invalid. No notification sent."
+            echo "::error title=No recipients::DISTRIBUTION_LISTis empty. Notification not sent."
             exit 1
           fi
           echo "Recipients: $MENTIONS"
 
-          BODY="${MENTIONS}
+          # ── Build body at COLUMN 0 (clean markdown - aligned tables) ──
+          {
+            echo "${MENTIONS}"
+            echo ""
+            echo "## CI/CD Quality Gate Report - ${OVERALL}"
+            echo ""
+            echo "**Branch:** ${TARGET_BRANCH}"
+            echo ""
+            echo "**Time:** $(date -u +'%Y-%m-%d %H:%M UTC')"
+            echo ""
+            echo "**Summary:** ${PASSED_COUNT} passed Postman &nbsp;|&nbsp; ${FAILED_COUNT} failed &nbsp;|&nbsp; ${CPILINT_FAILED} passed Postman but failed CPILint"
+            echo ""
+            if [ -s passed_rows.md ]; then
+              echo "### Passed iFlows (proceeding to PR)"
+              echo ""
+              echo "| iFlow | Version | Postman | CPILint |"
+              echo "|-------|---------|---------|---------|"
+              cat passed_rows.md
+              echo ""
+            fi
+            if [ -s cpilint_rows.md ]; then
+              echo "### CPILint Issues (deployment proceeded - please review)"
+              echo ""
+              echo "| iFlow | Version | Why CPILint Failed |"
+              echo "|-------|---------|--------------------|"
+              cat cpilint_rows.md
+              echo ""
+            fi
+            if [ -s failed_rows.md ]; then
+              echo "### Failed iFlows (removed - fix and re-run)"
+              echo ""
+              echo "| iFlow | Version | Gate | Why It Failed | How to Fix |"
+              echo "|-------|---------|------|---------------|------------|"
+              cat failed_rows.md
+              echo ""
+            fi
+            echo ""
+            echo "[View full workflow run](${RUN_URL})"
+          } > report-body.md
 
-          ## CI/CD Quality Gate Report - ${OVERALL}
+          # Step summary (visible on run)
+          cat report-body.md >> "$GITHUB_STEP_SUMMARY"
 
-          **Branch:** ${TARGET_BRANCH} | **Time:** $(date -u +'%Y-%m-%d %H:%M UTC')
-          **Summary:** ${PASSED_COUNT} passed Postman, ${FAILED_COUNT} failed, ${CPILINT_FAILED} passed Postman but failed CPILint
-          "
-          if [ -n "$PASSED_ROWS" ]; then
-            BODY="${BODY}
-          ### Passed iFlows (proceeding to PR)
-          | iFlow | Version | Postman | CPILint |
-          |-------|---------|---------|---------|
-          ${PASSED_ROWS}"
-          fi
-          if [ -n "$CPILINT_ISSUE_ROWS" ]; then
-            BODY="${BODY}
-          ### CPILint Issues (deployment proceeded - please review)
-          | iFlow | Version | Why CPILint Failed |
-          |-------|---------|--------------------|
-          ${CPILINT_ISSUE_ROWS}"
-          fi
-          if [ -n "$FAILED_ROWS" ]; then
-            BODY="${BODY}
-          ### Failed iFlows (removed - fix and re-run)
-          | iFlow | Version | Gate | Why It Failed | How to Fix |
-          |-------|---------|------|---------------|------------|
-          ${FAILED_ROWS}"
-          fi
-          BODY="${BODY}
-
-          [View full workflow run](${RUN_URL})"
-
-          echo "$BODY" >> "$GITHUB_STEP_SUMMARY"
-
-          # ── Create the notification issue; FAIL the job if it doesn't succeed ──
+          # Create notification issue; FAIL if it doesn't succeed
           if gh issue create \
                --repo "${{ github.repository }}" \
                --title "[Quality Gate] ${OVERALL} - $(date -u +'%Y-%m-%d %H:%M UTC')" \
-               --body "$BODY"; then
-            echo "Notification issue created - recipients notified."
+               --body-file report-body.md; then
+            echo "Notification issue created."
           else
             echo "::error title=Notification failed::Could not create the notification issue."
             exit 1
           fi
 
   # ═══════════════════════════════════════════════════════════════
-  # JOB 5: Auto-PR to develop — SMTP-free approval; FAILS if notify fails
+  # JOB 5: Auto-PR to develop — SMTP-free approval with PR link
   # ═══════════════════════════════════════════════════════════════
   auto-pr-develop:
     name: Auto-PR to develop
@@ -878,8 +888,9 @@ jobs:
                 --body "$PR_BODY")
 
               PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
-              echo "PR #$PR_NUMBER created"
-              echo "${IFLOW_ID}|${VERSION}|${PR_NUMBER}" >> pr-summary.txt
+              PR_DIRECT_URL="https://github.com/${{ github.repository }}/pull/${PR_NUMBER}"
+              echo "PR #$PR_NUMBER created: $PR_DIRECT_URL"
+              echo "${IFLOW_ID}|${VERSION}|${PR_NUMBER}|${PR_DIRECT_URL}" >> pr-summary.txt
             ); then
               CREATED=$((CREATED + 1))
             else
@@ -894,7 +905,7 @@ jobs:
             echo "prs_created=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Notify approvers (fails if not sent)
+      - name: Notify approvers (with PR link, fails if not sent)
         if: steps.create_prs.outputs.prs_created == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -933,22 +944,28 @@ jobs:
           echo "Approver recipients: $MENTIONS"
 
           NOTIFY_FAILED=0
-          while IFS='|' read -r id version prnum; do
+          # pr-summary.txt: id|version|prnum|prurl
+          while IFS='|' read -r id version prnum prurl; do
             [ -z "$id" ] && continue
             CP=$(cpilint_status "$id")
 
-            BODY="${MENTIONS}
+            # Build comment body at COLUMN 0 (clean markdown) with the PR link
+            {
+              echo "${MENTIONS}"
+              echo ""
+              echo "**Approval needed:** \`${id}\` (v${version}) passed the Postman quality gate."
+              echo ""
+              echo "| Gate | Result |"
+              echo "|------|--------|"
+              echo "| Postman | PASSED |"
+              echo "| CPILint | ${CP} |"
+              echo ""
+              echo "**[Click here to review and approve this PR](${prurl})**"
+              echo ""
+              echo "Merge to develop to deploy to QA."
+            } > approve-comment.md
 
-          **Approval needed:** \`${id}\` (v${version}) passed the Postman quality gate.
-
-          | Gate | Result |
-          |------|--------|
-          | Postman | PASSED |
-          | CPILint | ${CP} |
-
-          Please review and approve this PR to deploy to QA (merge to develop)."
-
-            if gh pr comment "$prnum" --repo "${{ github.repository }}" --body "$BODY"; then
+            if gh pr comment "$prnum" --repo "${{ github.repository }}" --body-file approve-comment.md; then
               echo "Notified approvers on PR #$prnum for $id"
             else
               echo "::error::Failed to comment on PR #$prnum for $id"
@@ -956,10 +973,8 @@ jobs:
             fi
           done < pr-summary.txt
 
-          # FAIL the job (red) if any approver notification failed
           if [ "$NOTIFY_FAILED" -eq 1 ]; then
-            echo "::error title=Approval notification failed::One or more approver notifications were not sent."
+            echo "::error title=Approval notification failed::One or more notifications not sent."
             exit 1
           fi
-
           echo "All approver notifications sent."
