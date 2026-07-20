@@ -1,4 +1,4 @@
-name: Download ReadyForDeployment iFlows from SAP BTP
+name: EMAIL-TEST
 
 on:
   workflow_dispatch:
