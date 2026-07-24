@@ -461,7 +461,7 @@ jobs:
     # ═══════════════════════════════════════════════════════════════
   # JOB 3: Postman — tests ALL new iFlows (CPILint is advisory, not a gate)
   # ═══════════════════════════════════════════════════════════════
-   run-postman:
+  run-postman:
     name: Postman collection tests
     needs: [download-ready-iflows, run-cpilint]
     if: needs.download-ready-iflows.outputs.skip_download != 'true'
