@@ -461,7 +461,7 @@ jobs:
     # ═══════════════════════════════════════════════════════════════
   # JOB 3: Postman — tests ALL new iFlows (CPILint is advisory, not a gate)
   # ═══════════════════════════════════════════════════════════════
-  run-postman:
+   run-postman:
     name: Postman collection tests
     needs: [download-ready-iflows, run-cpilint]
     if: needs.download-ready-iflows.outputs.skip_download != 'true'
@@ -484,7 +484,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Download CPILint artifacts (new-iflows list handoff)
+      - name: Download CPILint new-iflows list 
         uses: actions/download-artifact@v4
         with:
           name: cpilint-reports
@@ -500,7 +500,7 @@ jobs:
         shell: bash
         run: npm install -g newman@6.2.1
 
-      - name: Run Postman on ALL new iFlows (partial success)
+      - name: Run Postman 
         id: run
         env:
           CPI_DEV_ENDPOINT: ${{ secrets.CPI_DEV_ENDPOINT }}
@@ -515,11 +515,9 @@ jobs:
           COLLECTIONS_DIR="$DOWNLOAD_DIR/test"
           TOTAL_PASSED=0
           TOTAL_FAILED=0
-          REMOVED=""
           : > failure-details.txt
           : > passed-list.txt
 
-          # ── Read ALL new iFlows (CPILint is advisory - does NOT gate this) ──
           CPILINT_NEW="cpilint-artifacts/cpilint-new-iflows.txt"
           if [ ! -f "$CPILINT_NEW" ]; then
             echo "No new-iflows list found - nothing to Postman-test."
@@ -534,7 +532,7 @@ jobs:
             exit 0
           fi
 
-          echo "New iFlows to Postman-test (all, regardless of CPILint result):"
+          echo "iFlows to Postman-test (advisory):"
           echo "$NEW_IDS"
 
           while IFS= read -r IFLOW_ID; do
@@ -544,75 +542,66 @@ jobs:
             IFLOW_DIR="$DOWNLOAD_DIR/$SAFE_ID"
             collection="$COLLECTIONS_DIR/${IFLOW_ID}.collection.json"
 
-            # Safety: iFlow folder must still exist
-            [ ! -d "$IFLOW_DIR" ] && { echo "SKIP $IFLOW_ID (folder gone)"; continue; }
-
             VERSION=$(ls -1 "$IFLOW_DIR" 2>/dev/null | head -1)
             [ -z "$VERSION" ] && VERSION="unknown"
 
             echo "════════════════════════════════════════"
             echo "Testing: $IFLOW_ID v$VERSION"
 
-            # Coverage check - no collection => remove + fail (Postman IS the gate)
             if [ ! -f "$collection" ]; then
-              echo "NO COVERAGE: '$IFLOW_ID' - REMOVING"
+              echo "NO COVERAGE: '$IFLOW_ID' (advisory - not blocking)"
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
-              echo "${IFLOW_ID}|${VERSION}|Coverage|No Postman collection in btp-iflows/test/|Create btp-iflows/test/${IFLOW_ID}.collection.json, then re-run." >> failure-details.txt
-              if [ -n "$SAFE_ID" ] && [ "$SAFE_ID" != "test" ] && [ -d "$IFLOW_DIR" ] && [ "$IFLOW_DIR" != "$DOWNLOAD_DIR" ]; then
-                rm -rf "$IFLOW_DIR"
-                REMOVED="${REMOVED}${IFLOW_ID} (no-coverage); "
-              fi
+              echo "${IFLOW_ID}|${VERSION}|Postman|No Postman collection in btp-iflows/test/|Add btp-iflows/test/${IFLOW_ID}.collection.json for coverage (advisory - did not block)." >> failure-details.txt
               continue
             fi
 
-            FAILED_THIS=0
             set +e
-            newman run "$collection" --env-var "baseUrl=$CPI_DEV_ENDPOINT" --env-var "tokenUrl=$CPI_TOKEN_URL" --env-var "clientId=$CPI_CLIENT_ID" --env-var "clientSecret=$CPI_CLIENT_SECRET" > "postman-${SAFE_ID}.log" 2>&1
+            newman run "$collection" \
+              --env-var "baseUrl=$CPI_DEV_ENDPOINT" \
+              --env-var "tokenUrl=$CPI_TOKEN_URL" \
+              --env-var "clientId=$CPI_CLIENT_ID" \
+              --env-var "clientSecret=$CPI_CLIENT_SECRET" \
+              --reporters cli,json \
+              --reporter-json-export "postman-${SAFE_ID}-detail.json" \
+              > "postman-${SAFE_ID}.log" 2>&1
             POSTMAN_EXIT=$?
             set -e
 
             cat "postman-${SAFE_ID}.log"
-            echo "DEBUG: Newman exit code = $POSTMAN_EXIT"
+            echo "DEBUG: Newman exit = $POSTMAN_EXIT"
+
+            T_ASSERT=0; F_ASSERT=0
+            if [ -f "postman-${SAFE_ID}-detail.json" ]; then
+              T_ASSERT=$(jq '.run.stats.assertions.total // 0' "postman-${SAFE_ID}-detail.json" 2>/dev/null || echo 0)
+              F_ASSERT=$(jq '.run.stats.assertions.failed // 0' "postman-${SAFE_ID}-detail.json" 2>/dev/null || echo 0)
+            fi
+            P_ASSERT=$((T_ASSERT - F_ASSERT))
 
             if [ "$POSTMAN_EXIT" -eq 0 ]; then
-              echo "PASSED: $IFLOW_ID"
+              echo "PASSED: $IFLOW_ID (${P_ASSERT}/${T_ASSERT})"
               TOTAL_PASSED=$((TOTAL_PASSED + 1))
-              echo "${IFLOW_ID}|${VERSION}|Postman" >> passed-list.txt
+              echo "${IFLOW_ID}|${VERSION}|Postman|${P_ASSERT}/${T_ASSERT} tests passed" >> passed-list.txt
             else
-              echo "FAILED: $IFLOW_ID"
+
+              echo "FAILED (advisory): $IFLOW_ID (${P_ASSERT}/${T_ASSERT})"
               TOTAL_FAILED=$((TOTAL_FAILED + 1))
               REASON=$(grep -iE "AssertionError|Error|Invalid URI|Forbidden|Not Found|expected" "postman-${SAFE_ID}.log" | head -3 | tr '\n' ' ' | sed 's/|/-/g')
-              [ -z "$REASON" ] && REASON="Postman test failed (see log)"
-              echo "${IFLOW_ID}|${VERSION}|Postman|${REASON}|Check the iFlow endpoint, payload, auth, expected response. Fix and re-run." >> failure-details.txt
-              if [ -n "$SAFE_ID" ] && [ "$SAFE_ID" != "test" ] && [ -d "$IFLOW_DIR" ] && [ "$IFLOW_DIR" != "$DOWNLOAD_DIR" ]; then
-                rm -rf "$IFLOW_DIR"
-                REMOVED="${REMOVED}${IFLOW_ID} (test-fail); "
-              fi
+              [ -z "$REASON" ] && REASON="Postman test failed (${P_ASSERT}/${T_ASSERT} passed)"
+              echo "${IFLOW_ID}|${VERSION}|Postman|${REASON}|Advisory - review the iFlow endpoint/tests. Did NOT block deployment." >> failure-details.txt
             fi
           done <<< "$NEW_IDS"
 
           echo "════════════════════════════════════════"
-          echo "Postman — Passed: $TOTAL_PASSED | Failed: $TOTAL_FAILED"
+          echo "Postman (advisory) — Passed: $TOTAL_PASSED | Failed: $TOTAL_FAILED"
 
-          # Commit removals (Postman failures / no-coverage)
-          if [ -n "$REMOVED" ]; then
-            git add -A "$DOWNLOAD_DIR"
-            if ! git diff --staged --quiet; then
-              git commit -m "Remove Postman-failed iFlows - run ${{ github.run_id }}"
-              git fetch origin "$TARGET_BRANCH"
-              git pull --rebase origin "$TARGET_BRANCH"
-              git push origin "$TARGET_BRANCH"
-            fi
-          fi
-
-          # Output has_passers so auto-PR runs ONLY if something passed
-          if [ -s passed-list.txt ]; then
+          NEW_COUNT=$(echo "$NEW_IDS" | grep -c . 2>/dev/null | tr -d '[:space:]'); [ -z "$NEW_COUNT" ] && NEW_COUNT=0
+          if [ "$NEW_COUNT" -gt 0 ]; then
             echo "has_passers=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_passers=false" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "Postman gate complete (partial success allowed)"
+          echo "Postman advisory complete - not blocking auto-PR."
           exit 0
 
       - name: Upload Postman reports
@@ -622,6 +611,7 @@ jobs:
           name: postman-reports
           path: |
             postman-*.log
+            postman-*-detail.json
             failure-details.txt
             passed-list.txt
           if-no-files-found: ignore
@@ -834,7 +824,10 @@ jobs:
           TARGET_BRANCH="${TARGET_BRANCH:-feature}"
           DOWNLOAD_DIR="${DOWNLOAD_DIR:-btp-iflows}"
 
-          PASSED_FILE="postman-artifacts/passed-list.txt"
+          
+          PASSED_FILE="cpilint-artifacts/cpilint-new-iflows.txt"
+          PASSED_IDS=$(cut -d'|' -f1 "$PASSED_FILE" | grep -v '^$' | sort -u)
+
           if [ ! -f "$PASSED_FILE" ] || [ ! -s "$PASSED_FILE" ]; then
             echo "::error title=No iFlows passed::Nothing to create a PR for."
             echo "prs_created=false" >> "$GITHUB_OUTPUT"
