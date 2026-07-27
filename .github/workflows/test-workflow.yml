@@ -1,0 +1,76 @@
+name: TEST - Push file to protected branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: "Protected branch to push to (e.g., develop)"
+        required: true
+        default: "develop"
+
+permissions:
+  contents: write
+
+jobs:
+  test-push:
+    name: Test push to protected branch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_branch }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push test file via bot PAT
+        env:
+          GH_PAT: ${{ secrets.CICD_BOT_TOKEN }}  
+          TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_PAT:-}" ]; then
+            echo "::error::CICD_BOT_TOKEN secret is empty. Add the bot user's PAT."
+            exit 1
+          fi
+          echo "Bot PAT: present"
+
+          git config user.name "deep2131"
+          git config user.email "deep2131@users.noreply.github.com"
+          git remote set-url origin \
+            "https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}.git"
+
+          # ── Ensure we're on the target branch, up to date ──
+          git fetch origin "$TARGET_BRANCH"
+          git checkout "$TARGET_BRANCH"
+          git pull origin "$TARGET_BRANCH"
+
+          # ── Create a test file ──
+          mkdir -p .test-push
+          echo "Test push at $(date -u +'%Y-%m-%d %H:%M:%S UTC') by deep2131 (run ${{ github.run_id }})" \
+            > ".test-push/test-${{ github.run_id }}.txt"
+          echo "Created .test-push/test-${{ github.run_id }}.txt"
+
+          # ── Commit + push to the PROTECTED branch ──
+          git add -A .test-push
+          git commit -m "TEST: bot push to protected ${TARGET_BRANCH} (run ${{ github.run_id }})"
+
+          echo "Pushing to protected branch ${TARGET_BRANCH}..."
+          if git push origin "$TARGET_BRANCH"; then
+            echo "SUCCESS - bot PAT pushed to protected ${TARGET_BRANCH}"
+            echo "Your bot PAT + bypass allowlist setup WORKS."
+          else
+            echo "::error::Push FAILED. Check:"
+            echo "  1. Bot user is in ${TARGET_BRANCH} bypass allowlist"
+            echo "  2. CICD_BOT_TOKEN is the BOT user's PAT (Contents: write)"
+            echo "  3. Bot user has Write access to the repo"
+            exit 1
+          fi
+
+      - name: Confirm
+        shell: bash
+        run: |
+          echo "Test complete. Check the ${{ github.event.inputs.target_branch }} branch"
+          echo "for .test-push/test-${{ github.run_id }}.txt"
+          echo "You can delete the .test-push folder afterward."
